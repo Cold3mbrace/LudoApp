@@ -11,7 +11,6 @@ import {
   ExternalLink,
   FolderOpen,
   Gift,
-  HelpCircle,
   Link2,
   Loader2,
   MessageCircle,
