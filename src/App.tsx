@@ -532,26 +532,68 @@ export default function App() {
 
   const isAdmin = Boolean(tgUserId && ADMIN_IDS.has(tgUserId));
 
-  useEffect(() => {
-    let cancelled = false;
+function getTelegramUser() {
+  const tg = window.Telegram?.WebApp;
+  const user = tg?.initDataUnsafe?.user;
+  if (user?.id) {
+    return {
+      id: Number(user.id),
+      username: user.username || "",
+      first_name: user.first_name || "",
+      last_name: user.last_name || "",
+      photo_url: user.photo_url || "",
+    };
+  }
+  return null;
+}
 
-    async function bootstrap() {
-      window.Telegram?.WebApp?.ready?.();
-      window.Telegram?.WebApp?.expand?.();
+async function waitForTelegramUser(timeoutMs = 4000, stepMs = 150) {
+  const started = Date.now();
 
-      const telegramUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
-      const fallbackKey = createGuestKey();
-      const nextTgUserId = typeof telegramUser?.id === "number" ? telegramUser.id : null;
-      const fullName = [telegramUser?.first_name, telegramUser?.last_name].filter(Boolean).join(" ").trim();
+  while (Date.now() - started < timeoutMs) {
+    const found = getTelegramUser();
+    if (found?.id) return found;
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
 
-      if (nextTgUserId) {
-        setTgUserId(nextTgUserId);
-        setTgIdentity({
-          name: fullName || telegramUser?.username || "Telegram user",
-          handle: telegramUser?.username ? `@${telegramUser.username}` : "Telegram",
-          avatar: telegramUser?.photo_url || null,
-        });
-      }
+  return null;
+}
+
+useEffect(() => {
+  let cancelled = false;
+
+  async function bootTelegram() {
+    window.Telegram?.WebApp?.ready?.();
+    window.Telegram?.WebApp?.expand?.();
+
+    const telegramUser = await waitForTelegramUser();
+
+    if (cancelled) return;
+
+    const nextUserKey = telegramUser?.id ? `tg-${telegramUser.id}` : createGuestKey();
+    setUserKey(nextUserKey);
+    setTgUserId(telegramUser?.id ?? null);
+
+    if (telegramUser) {
+      const fullName = [telegramUser.first_name, telegramUser.last_name]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+
+      setTgIdentity({
+        name: fullName || telegramUser.username || "Telegram user",
+        handle: telegramUser.username ? `@${telegramUser.username}` : "Telegram",
+        avatar: telegramUser.photo_url || null,
+      });
+    }
+  }
+
+  bootTelegram();
+
+  return () => {
+    cancelled = true;
+  };
+}, []);
 
       if (!apiBase || !nextTgUserId) {
         if (!cancelled) setUserKey(nextTgUserId ? `tg-${nextTgUserId}` : fallbackKey);
