@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 
 const app = express();
 const PORT = Number(process.env.PORT || 8787);
+const HOST = "0.0.0.0";
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 const STEAM_WEB_API_KEY = process.env.STEAM_WEB_API_KEY || "";
 const ADMIN_IDS = new Set([793655800, 1069618912]);
@@ -25,6 +26,10 @@ const WEEK_MS = 1000 * 60 * 60 * 24 * 7;
 
 app.use(cors({ origin: FRONTEND_ORIGIN }));
 app.use(express.json({ limit: "1mb" }));
+
+app.get("/", (_req, res) => {
+  res.send("LUDO API is running");
+});
 
 async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true });
@@ -1447,7 +1452,8 @@ app.post("/api/referral/attach", async (req, res) => {
   }
 });
 
-app.listen(PORT, async () => {
-  await Promise.all([ensureDir(DATA_DIR), ensureDir(USERS_DIR), ensureDir(PRICES_DIR), ensureDir(NEWS_DIR)]);
-  console.log(`LUDO API listening on http://localhost:${PORT}`);
+await Promise.all([ensureDir(DATA_DIR), ensureDir(USERS_DIR), ensureDir(PRICES_DIR), ensureDir(NEWS_DIR)]);
+
+app.listen(PORT, HOST, () => {
+  console.log(`LUDO API listening on http://${HOST}:${PORT}`);
 });
