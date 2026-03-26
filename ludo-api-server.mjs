@@ -16,7 +16,10 @@ const DATA_DIR = path.join(process.cwd(), ".ludo-data");
 const USERS_DIR = path.join(DATA_DIR, "users");
 const PRICES_DIR = path.join(DATA_DIR, "prices");
 const NEWS_DIR = path.join(DATA_DIR, "news");
+const ITEMS_DIR = path.join(DATA_DIR, "items");
 const REF_INDEX_PATH = path.join(DATA_DIR, "referral-index.json");
+const TICKETS_PATH = path.join(DATA_DIR, "tickets.json");
+const ACTIVITY_PATH = path.join(DATA_DIR, "activity.json");
 
 const PRICE_TTL_MS = 1000 * 60 * 60 * 6;
 const PRICE_HISTORY_MIN_INTERVAL_MS = 1000 * 60 * 60 * 12;
@@ -192,6 +195,7 @@ function defaultUserState(key) {
       points: 0,
       attachedRefCode: null,
       attachedAt: null,
+      verifiedAt: null,
     },
     steam: {
       input: "",
@@ -258,6 +262,9 @@ function mergeUserState(current, incoming) {
       attachedAt: typeof incoming?.referral?.attachedAt === "number" || incoming?.referral?.attachedAt === null
         ? incoming.referral.attachedAt
         : base.referral.attachedAt,
+      verifiedAt: typeof incoming?.referral?.verifiedAt === "number" || incoming?.referral?.verifiedAt === null
+        ? incoming.referral.verifiedAt
+        : base.referral.verifiedAt,
     },
     steam: {
       input: typeof incoming?.steam?.input === "string" ? incoming.steam.input : base.steam.input,
@@ -349,6 +356,326 @@ function telegramIdentityView(telegram = {}) {
   };
 }
 
+async function readActivityLog() {
+  return readJson(ACTIVITY_PATH, { users: {}, daily: {} });
+}
+
+async function writeActivityLog(payload) {
+  await writeJson(ACTIVITY_PATH, payload || { users: {}, daily: {} });
+}
+
+async function recordUserActivity(key, tgUserId = null) {
+  if (!key) return null;
+  const log = await readActivityLog();
+  const now = Date.now();
+  const today = todayStr();
+
+  const current = log.users?.[key] || {
+    key,
+    tgUserId: tgUserId || null,
+    firstSeenAt: now,
+    lastSeenAt: 0,
+    visits: 0,
+  };
+
+  current.tgUserId = Number.isFinite(Number(tgUserId)) && Number(tgUserId) > 0 ? Number(tgUserId) : current.tgUserId || null;
+  current.lastSeenAt = now;
+  current.visits = Number(current.visits || 0) + 1;
+  log.users[key] = current;
+
+  const bucket = log.daily?.[today] || { users: [] };
+  const userSet = new Set(Array.isArray(bucket.users) ? bucket.users : []);
+  userSet.add(key);
+  bucket.users = Array.from(userSet);
+  log.daily[today] = bucket;
+
+  const minKeep = Date.now() - 1000 * 60 * 60 * 24 * 45;
+  for (const [dateKey, value] of Object.entries(log.daily || {})) {
+    const ts = parseDateMaybe(dateKey);
+    const keep = ts && ts >= minKeep;
+    if (!keep) delete log.daily[dateKey];
+    else if (!Array.isArray(value?.users)) log.daily[dateKey] = { users: [] };
+  }
+
+  await writeActivityLog(log);
+  return current;
+}
+
+async function finalizeReferralForUser(userOrKey) {
+  const user = typeof userOrKey === "string" ? await readUserState(userOrKey) : userOrKey;
+  if (!user?.key || !user?.referral?.attachedRefCode || user?.referral?.verifiedAt) {
+    return user;
+  }
+
+  const referrerKey = await findKeyByReferralCode(user.referral.attachedRefCode);
+  if (!referrerKey || referrerKey === user.key) {
+    return user;
+  }
+
+  const referrer = await readUserState(referrerKey);
+  referrer.referral.verified = Number(referrer.referral.verified || 0) + 1;
+  referrer.referral.points = Number(referrer.referral.points || 0) + 1;
+  user.referral.verifiedAt = Date.now();
+
+  await writeUserState(referrerKey, referrer);
+  return writeUserState(user.key, user);
+}
+
+function isAdminId(value) {
+  const id = Number(value || 0);
+  return Number.isFinite(id) && ADMIN_IDS.has(id);
+}
+
+function normalizeTicketStatus(value) {
+  return String(value || "open").trim().toLowerCase() === "done" ? "done" : "open";
+}
+
+async function readTickets() {
+  const raw = await readJson(TICKETS_PATH, []);
+  return Array.isArray(raw) ? raw : [];
+}
+
+async function writeTickets(items) {
+  await writeJson(TICKETS_PATH, Array.isArray(items) ? items : []);
+}
+
+async function getItemMetaByHashName(marketHashName) {
+  const hash = String(marketHashName || "").trim();
+  if (!hash) return null;
+
+  const cachePath = path.join(ITEMS_DIR, `${fileSafe(hash)}.json`);
+  const cached = await readJson(cachePath, null);
+  if (cached?.updatedAt && Date.now() - cached.updatedAt < 1000 * 60 * 60 * 24 * 7 && cached?.item) {
+    return cached.item;
+  }
+
+  const url =
+    "https://steamcommunity.com/market/search/render/?" +
+    new URLSearchParams({
+      query: hash,
+      appid: "730",
+      norender: "1",
+      count: "12",
+      start: "0",
+    });
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 LUDO-app",
+        Accept: "application/json, text/plain, */*",
+      },
+    });
+    if (!response.ok) throw new Error(`market_search_${response.status}`);
+    const data = await response.json();
+    const results = Array.isArray(data?.results) ? data.results : [];
+    const exact = results.find((item) => String(item?.hash_name || item?.asset_description?.market_hash_name || "").toLowerCase() === hash.toLowerCase())
+      || results.find((item) => String(item?.name || item?.hash_name || "").toLowerCase().includes(hash.toLowerCase()));
+
+    const item = exact
+      ? {
+          marketHashName: String(exact.hash_name || exact?.asset_description?.market_hash_name || hash),
+          name: String(exact.name || exact.hash_name || hash),
+          type: String(exact?.asset_description?.type || exact.type || "CS2 item"),
+          iconUrl: exact?.asset_description?.icon_url
+            ? `https://community.cloudflare.steamstatic.com/economy/image/${exact.asset_description.icon_url}/256fx256f`
+            : null,
+          descriptionText: Array.isArray(exact?.asset_description?.descriptions)
+            ? exact.asset_description.descriptions.map((entry) => stripHtml(entry?.value || "")).filter(Boolean).join(" · ")
+            : "",
+        }
+      : {
+          marketHashName: hash,
+          name: hash,
+          type: "CS2 item",
+          iconUrl: null,
+          descriptionText: "",
+        };
+
+    await writeJson(cachePath, { updatedAt: Date.now(), item });
+    return item;
+  } catch {
+    if (cached?.item) return cached.item;
+    return {
+      marketHashName: hash,
+      name: hash,
+      type: "CS2 item",
+      iconUrl: null,
+      descriptionText: "",
+    };
+  }
+}
+
+async function buildMarketWatchItem(marketHashName) {
+  const meta = await getItemMetaByHashName(marketHashName);
+  const priceMeta = await getPriceSnapshot(meta?.marketHashName || marketHashName);
+  return {
+    id: `watch-${fileSafe(meta?.marketHashName || marketHashName)}`,
+    marketHashName: meta?.marketHashName || marketHashName,
+    name: meta?.name || marketHashName,
+    type: meta?.type || "CS2 item",
+    iconUrl: meta?.iconUrl || null,
+    tradable: true,
+    marketable: true,
+    quantity: 1,
+    price: Number(priceMeta?.price || 0),
+    totalValue: Number(priceMeta?.price || 0),
+    deltaPct: Number(priceMeta?.deltaPct || 0),
+    history: Array.isArray(priceMeta?.history) ? priceMeta.history : [],
+    note: "Предмет из watchlist",
+    descriptionText: meta?.descriptionText || "",
+  };
+}
+
+async function searchSteamMarketItems(query, limit = 8) {
+  const q = String(query || "").trim();
+  if (!q) return [];
+
+  const url =
+    "https://steamcommunity.com/market/search/render/?" +
+    new URLSearchParams({
+      query: q,
+      appid: "730",
+      norender: "1",
+      count: String(Math.min(12, Math.max(1, limit))),
+      start: "0",
+    });
+
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 LUDO-app",
+      Accept: "application/json, text/plain, */*",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Steam market search failed: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const results = Array.isArray(data?.results) ? data.results : [];
+  const items = [];
+
+  for (const result of results.slice(0, limit)) {
+    const marketHashName = String(result?.hash_name || result?.asset_description?.market_hash_name || result?.name || "").trim();
+    if (!marketHashName) continue;
+    const priceMeta = await getPriceSnapshot(marketHashName);
+    items.push({
+      id: `market-search-${fileSafe(marketHashName)}`,
+      marketHashName,
+      name: String(result?.name || marketHashName),
+      type: String(result?.asset_description?.type || result?.type || "CS2 item"),
+      iconUrl: result?.asset_description?.icon_url
+        ? `https://community.cloudflare.steamstatic.com/economy/image/${result.asset_description.icon_url}/256fx256f`
+        : null,
+      tradable: true,
+      marketable: true,
+      quantity: 1,
+      price: Number(priceMeta?.price || 0),
+      totalValue: Number(priceMeta?.price || 0),
+      deltaPct: Number(priceMeta?.deltaPct || 0),
+      history: Array.isArray(priceMeta?.history) ? priceMeta.history : [],
+      note: "Предмет из поиска Steam Market",
+      descriptionText: Array.isArray(result?.asset_description?.descriptions)
+        ? result.asset_description.descriptions.map((entry) => stripHtml(entry?.value || "")).filter(Boolean).join(" · ")
+        : "",
+    });
+    await sleep(120);
+  }
+
+  return items;
+}
+
+function extractReadableArticleText(html = "") {
+  const cleaned = String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ");
+
+  const candidates = [
+    cleaned.match(/<article[\s\S]*?<\/article>/i)?.[0] || "",
+    cleaned.match(/<main[\s\S]*?<\/main>/i)?.[0] || "",
+    cleaned.match(/<div[^>]+class=["'][^"']*(article|content|news|post|story|body)[^"']*["'][\s\S]*?<\/div>/i)?.[0] || "",
+    cleaned,
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const text = stripHtml(candidate).replace(/\n{3,}/g, "\n\n").trim();
+    if (text.length >= 280) {
+      return text.slice(0, 24000);
+    }
+  }
+
+  return stripHtml(cleaned).slice(0, 24000);
+}
+
+async function fetchFullArticle(url) {
+  const target = String(url || "").trim();
+  if (!/^https?:\/\//i.test(target)) {
+    throw new Error("Нужен полный URL статьи.");
+  }
+
+  const cachePath = path.join(NEWS_DIR, `article-${fileSafe(crypto.createHash("sha1").update(target).digest("hex"))}.json`);
+  const cached = await readJson(cachePath, null);
+  if (cached?.updatedAt && Date.now() - cached.updatedAt < 1000 * 60 * 60 * 12 && cached?.body) {
+    return cached;
+  }
+
+  const html = await fetchText(target);
+  const title = decodeHtml(extractMetaContent(html, "og:title") || stripHtml(html.match(/<title>(.*?)<\/title>/i)?.[1] || ""));
+  const description = decodeHtml(extractMetaContent(html, "og:description"));
+  const body = extractReadableArticleText(html);
+  const payload = {
+    url: target,
+    title,
+    body: body.length >= 280 ? body : [description, body].filter(Boolean).join("\n\n").trim() || description || title,
+    imageUrl: extractMetaContent(html, "og:image") || extractFirstImage(html, target) || null,
+    updatedAt: Date.now(),
+  };
+  await writeJson(cachePath, payload);
+  return payload;
+}
+
+async function getAdminSummary() {
+  const [tickets, activity] = await Promise.all([readTickets(), readActivityLog()]);
+  const userFiles = await fs.readdir(USERS_DIR).catch(() => []);
+  const totalUsers = userFiles.filter((name) => name.endsWith('.json')).length;
+  const today = todayStr();
+  const activeToday = Array.isArray(activity?.daily?.[today]?.users) ? activity.daily[today].users.length : 0;
+
+  const last7 = new Set();
+  const start = Date.now() - 1000 * 60 * 60 * 24 * 6;
+  for (const [dateKey, bucket] of Object.entries(activity?.daily || {})) {
+    const ts = parseDateMaybe(dateKey);
+    if (!ts || ts < start) continue;
+    for (const key of Array.isArray(bucket?.users) ? bucket.users : []) {
+      last7.add(key);
+    }
+  }
+
+  let referralClicks = 0;
+  let referralVerified = 0;
+  let watchlistItems = 0;
+  for (const filename of userFiles.filter((name) => name.endsWith('.json')).slice(0, 20000)) {
+    const state = await readJson(path.join(USERS_DIR, filename), null);
+    referralClicks += Number(state?.referral?.clicks || 0);
+    referralVerified += Number(state?.referral?.verified || 0);
+    watchlistItems += Array.isArray(state?.watchlist) ? state.watchlist.length : 0;
+  }
+
+  const openTickets = tickets.filter((ticket) => normalizeTicketStatus(ticket?.status) !== 'done').length;
+  return {
+    totalUsers,
+    activeToday,
+    active7d: last7.size,
+    referralClicks,
+    referralVerified,
+    totalTickets: tickets.length,
+    openTickets,
+    watchlistItems,
+  };
+}
+
 async function upsertTelegramProfile(payload = {}) {
   const telegram = normalizeTelegramIdentity(payload);
   if (!telegram) throw new Error("Передай tgUserId");
@@ -360,9 +687,11 @@ async function upsertTelegramProfile(payload = {}) {
     telegram,
   };
   const saved = await writeUserState(key, next);
+  await recordUserActivity(key, telegram.id);
+  const finalized = await finalizeReferralForUser(saved);
   return {
     key,
-    state: saved,
+    state: finalized,
     tgUserId: telegram.id,
     identity: telegramIdentityView(telegram),
     isAdmin: ADMIN_IDS.has(telegram.id),
@@ -1120,6 +1449,9 @@ async function attachReferral(key, startParam) {
   if (user.referral.code === code || user.referral.attachedRefCode === code) {
     return user.referral;
   }
+  if (user.referral.attachedRefCode) {
+    return user.referral;
+  }
 
   const referrerKey = await findKeyByReferralCode(code);
   if (!referrerKey || referrerKey === key) {
@@ -1127,19 +1459,165 @@ async function attachReferral(key, startParam) {
   }
 
   const referrer = await readUserState(referrerKey);
-  referrer.referral.clicks += 1;
-  referrer.referral.verified += 1;
-  referrer.referral.points += 1;
+  referrer.referral.clicks = Number(referrer.referral.clicks || 0) + 1;
   user.referral.attachedRefCode = code;
   user.referral.attachedAt = Date.now();
 
   await writeUserState(referrerKey, referrer);
   const savedUser = await writeUserState(key, user);
-  return savedUser.referral;
+  const finalizedUser = await finalizeReferralForUser(savedUser);
+  return finalizedUser.referral;
 }
 
+app.get("/api/translate", async (req, res) => {
+  try {
+    const textValue = String(req.query.text || "").trim();
+    if (!textValue) throw new Error("Передай text");
+    const translated = await translateTextToRu(textValue);
+    res.json({ ok: true, translated });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось перевести текст.",
+    });
+  }
+});
+
+app.get("/api/news/article", async (req, res) => {
+  try {
+    const url = String(req.query.url || "").trim();
+    if (!url) throw new Error("Передай url");
+    const article = await fetchFullArticle(url);
+    res.json({ ok: true, ...article });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось загрузить статью.",
+    });
+  }
+});
+
+app.get("/api/market/search", async (req, res) => {
+  try {
+    const query = String(req.query.q || req.query.query || "").trim();
+    const limit = Math.min(10, Math.max(1, Number(req.query.limit || 6) || 6));
+    if (!query) throw new Error("Передай поисковый запрос.");
+    const items = await searchSteamMarketItems(query, limit);
+    res.json({ ok: true, items });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось найти предметы на рынке.",
+    });
+  }
+});
+
+app.get("/api/watchlist/details", async (req, res) => {
+  try {
+    const key = String(req.query.key || "").trim();
+    if (!key) throw new Error("Передай key");
+    const state = await readUserState(key);
+    const names = Array.from(new Set(Array.isArray(state.watchlist) ? state.watchlist.map((item) => String(item || "").trim()).filter(Boolean) : []));
+    const items = await mapWithConcurrency(names, async (marketHashName) => buildMarketWatchItem(marketHashName), 2);
+    res.json({ ok: true, items: items.filter(Boolean) });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось собрать watchlist.",
+    });
+  }
+});
+
+app.get("/api/tickets", async (req, res) => {
+  try {
+    const adminId = Number(req.query.adminId || 0);
+    if (!isAdminId(adminId)) {
+      res.status(403).json({ error: "Нет доступа." });
+      return;
+    }
+    const items = (await readTickets()).sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0));
+    res.json({ ok: true, items });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось получить тикеты.",
+    });
+  }
+});
+
+app.post("/api/tickets", async (req, res) => {
+  try {
+    const key = String(req.body?.key || "").trim() || "guest";
+    const message = String(req.body?.message || "").trim();
+    if (!message) throw new Error("Опиши проблему перед отправкой.");
+
+    const items = await readTickets();
+    const ticket = {
+      id: crypto.randomUUID(),
+      status: "open",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      message,
+      source: {
+        type: String(req.body?.sourceType || "app"),
+        id: req.body?.sourceId ? String(req.body.sourceId) : null,
+        title: String(req.body?.title || "Сообщение о проблеме"),
+        url: req.body?.url ? String(req.body.url) : null,
+      },
+      reporter: {
+        name: String(req.body?.reporterName || "Пользователь"),
+        handle: req.body?.reporterHandle ? String(req.body.reporterHandle) : null,
+        userId: Number.isFinite(Number(req.body?.reporterUserId)) ? Number(req.body.reporterUserId) : null,
+      },
+      key,
+    };
+    items.unshift(ticket);
+    await writeTickets(items.slice(0, 5000));
+    if (Number.isFinite(Number(req.body?.reporterUserId)) && Number(req.body?.reporterUserId) > 0) {
+      await recordUserActivity(key, Number(req.body.reporterUserId));
+    }
+    res.json({ ok: true, item: ticket });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось создать тикет.",
+    });
+  }
+});
+
+app.post("/api/tickets/:id/status", async (req, res) => {
+  try {
+    const adminId = Number(req.body?.adminId || 0);
+    if (!isAdminId(adminId)) {
+      res.status(403).json({ error: "Нет доступа." });
+      return;
+    }
+    const id = String(req.params?.id || "").trim();
+    const status = normalizeTicketStatus(req.body?.status);
+    const items = await readTickets();
+    const next = items.map((ticket) => ticket?.id === id ? { ...ticket, status, updatedAt: Date.now() } : ticket);
+    await writeTickets(next);
+    const item = next.find((ticket) => ticket?.id === id) || null;
+    res.json({ ok: true, item });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось обновить тикет.",
+    });
+  }
+});
+
+app.get("/api/admin/summary", async (req, res) => {
+  try {
+    const adminId = Number(req.query.adminId || 0);
+    if (!isAdminId(adminId)) {
+      res.status(403).json({ error: "Нет доступа." });
+      return;
+    }
+    const summary = await getAdminSummary();
+    res.json({ ok: true, summary });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось собрать сводку.",
+    });
+  }
+});
+
 app.get("/api/health", async (_req, res) => {
-  await Promise.all([ensureDir(DATA_DIR), ensureDir(USERS_DIR), ensureDir(PRICES_DIR), ensureDir(NEWS_DIR)]);
+  await Promise.all([ensureDir(DATA_DIR), ensureDir(USERS_DIR), ensureDir(PRICES_DIR), ensureDir(NEWS_DIR), ensureDir(ITEMS_DIR)]);
   res.json({
     ok: true,
     frontendOrigin: FRONTEND_ORIGIN,
@@ -1224,7 +1702,7 @@ app.get("/api/steam/resolve", async (req, res) => {
 
 app.get("/api/steam/inventory", async (req, res) => {
   try {
-    await Promise.all([ensureDir(DATA_DIR), ensureDir(USERS_DIR), ensureDir(PRICES_DIR), ensureDir(NEWS_DIR)]);
+    await Promise.all([ensureDir(DATA_DIR), ensureDir(USERS_DIR), ensureDir(PRICES_DIR), ensureDir(NEWS_DIR), ensureDir(ITEMS_DIR)]);
 
     const profileInput = String(req.query.profile || "");
     const key = String(req.query.key || "guest");
@@ -1379,6 +1857,12 @@ app.post("/api/profile-state", async (req, res) => {
       incoming.telegram = telegram;
     }
     const state = await writeUserState(key, incoming);
+    if (telegram?.id) {
+      await recordUserActivity(key, telegram.id);
+      const finalized = await finalizeReferralForUser(state);
+      res.json(finalized);
+      return;
+    }
     res.json(state);
   } catch (error) {
     res.status(400).json({
@@ -1393,6 +1877,7 @@ app.post("/api/daily-checkin", async (req, res) => {
     if (!key) throw new Error("Передай key");
 
     const state = await readUserState(key);
+    await recordUserActivity(key, state?.telegram?.id || null);
     const today = todayStr();
     const last = state.daily.lastCheckinDate;
 
@@ -1452,7 +1937,7 @@ app.post("/api/referral/attach", async (req, res) => {
   }
 });
 
-await Promise.all([ensureDir(DATA_DIR), ensureDir(USERS_DIR), ensureDir(PRICES_DIR), ensureDir(NEWS_DIR)]);
+await Promise.all([ensureDir(DATA_DIR), ensureDir(USERS_DIR), ensureDir(PRICES_DIR), ensureDir(NEWS_DIR), ensureDir(ITEMS_DIR)]);
 
 app.listen(PORT, HOST, () => {
   console.log(`LUDO API listening on http://${HOST}:${PORT}`);

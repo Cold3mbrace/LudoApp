@@ -108,6 +108,17 @@ type InventoryItem = {
   descriptionText: string;
 };
 
+type AdminSummary = {
+  totalUsers: number;
+  activeToday: number;
+  active7d: number;
+  referralClicks: number;
+  referralVerified: number;
+  totalTickets: number;
+  openTickets: number;
+  watchlistItems: number;
+};
+
 type ProfileState = {
   key: string;
   savedNewsIds: string[];
@@ -519,6 +530,12 @@ export default function App() {
   const [ticketContext, setTicketContext] = useState<{ title: string; url?: string | null; sourceType: string; sourceId?: string | null } | null>(null);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [ticketsLoading, setTicketsLoading] = useState(false);
+  const [watchlistMarketItems, setWatchlistMarketItems] = useState<InventoryItem[]>([]);
+  const [manualMarketQuery, setManualMarketQuery] = useState("");
+  const [manualMarketLoading, setManualMarketLoading] = useState(false);
+  const [manualMarketResults, setManualMarketResults] = useState<InventoryItem[]>([]);
+  const [adminSummary, setAdminSummary] = useState<AdminSummary | null>(null);
+  const [adminSummaryLoading, setAdminSummaryLoading] = useState(false);
 
 
   const userIdentity = useMemo<UserIdentity>(() => {
@@ -531,6 +548,23 @@ export default function App() {
   }, [tgIdentity, steamName, steamConnected, steamAvatar]);
 
   const isAdmin = Boolean(tgUserId && ADMIN_IDS.has(tgUserId));
+
+  const allTrackedItems = useMemo<InventoryItem[]>(() => {
+    const byHash = new Map<string, InventoryItem>();
+    for (const item of manualMarketResults) {
+      if (!item?.marketHashName) continue;
+      byHash.set(item.marketHashName, item);
+    }
+    for (const item of watchlistMarketItems) {
+      if (!item?.marketHashName) continue;
+      byHash.set(item.marketHashName, item);
+    }
+    for (const item of inventory) {
+      if (!item?.marketHashName) continue;
+      byHash.set(item.marketHashName, item);
+    }
+    return Array.from(byHash.values());
+  }, [inventory, manualMarketResults, watchlistMarketItems]);
 
   function getTelegramUser() {
     const tg = window.Telegram?.WebApp;
@@ -793,9 +827,35 @@ export default function App() {
   }, [connectSteam]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function run() {
+      if (!apiBase || !userKey || profileState.watchlist.length === 0) {
+        setWatchlistMarketItems([]);
+        return;
+      }
+      try {
+        const response = await fetch(`${apiBase}/api/watchlist/details?key=${encodeURIComponent(userKey)}`);
+        const data = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(data?.error || `watchlist_${response.status}`);
+        if (!cancelled) {
+          setWatchlistMarketItems(Array.isArray(data?.items) ? data.items : []);
+        }
+      } catch {
+        if (!cancelled) setWatchlistMarketItems([]);
+      }
+    }
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, userKey, profileState.watchlist]);
+
+  useEffect(() => {
     if (!selectedItemHash || !apiBase) return;
     let cancelled = false;
-    const selected = inventory.find((item) => item.marketHashName === selectedItemHash);
+    const selected = allTrackedItems.find((item) => item.marketHashName === selectedItemHash);
     if (!selected) return;
     async function run() {
       setHistoryLoading(true);
@@ -813,9 +873,9 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [apiBase, inventory, selectedItemHash]);
+  }, [apiBase, allTrackedItems, selectedItemHash]);
 
-  const selectedItem = useMemo(() => inventory.find((item) => item.marketHashName === selectedItemHash) || inventory[0] || null, [inventory, selectedItemHash]);
+  const selectedItem = useMemo(() => allTrackedItems.find((item) => item.marketHashName === selectedItemHash) || inventory[0] || watchlistMarketItems[0] || null, [allTrackedItems, inventory, watchlistMarketItems, selectedItemHash]);
 
   useEffect(() => {
     let cancelled = false;
@@ -844,7 +904,7 @@ export default function App() {
 
   const inventorySignals = useMemo<FeedItem[]>(() => {
     const watchSet = new Set(profileState.watchlist);
-    return inventory
+    return allTrackedItems
       .filter((item) => item.marketable && item.price > 0)
       .filter((item) => watchSet.has(item.marketHashName) || Math.abs(item.deltaPct) >= 2.5)
       .sort((a, b) => Number(watchSet.has(b.marketHashName)) - Number(watchSet.has(a.marketHashName)) || Math.abs(b.deltaPct) - Math.abs(a.deltaPct) || b.totalValue - a.totalValue)
@@ -859,7 +919,7 @@ export default function App() {
         url: item.marketable ? `https://steamcommunity.com/market/listings/730/${encodeURIComponent(item.marketHashName)}` : null,
         imageUrl: item.iconUrl,
       }));
-  }, [inventory, profileState.watchlist]);
+  }, [allTrackedItems, profileState.watchlist]);
 
   const feedItems = useMemo(() => {
     const combinedNews = dedupeFeedItems([...updatesFeed, ...esportsFeed, ...gamesFeed]);
@@ -880,11 +940,11 @@ export default function App() {
 
   const alerts = useMemo(() => {
     const q = watchlistSearch.trim().toLowerCase();
-    return inventory
+    return allTrackedItems
       .filter((item) => profileState.watchlist.includes(item.marketHashName) || Math.abs(item.deltaPct) >= 0.5)
       .filter((item) => watchlistKindFilter === "Все" || classifyItemKind(item) === watchlistKindFilter)
       .filter((item) => !q || item.name.toLowerCase().includes(q) || item.marketHashName.toLowerCase().includes(q));
-  }, [inventory, profileState.watchlist, watchlistSearch, watchlistKindFilter]);
+  }, [allTrackedItems, profileState.watchlist, watchlistSearch, watchlistKindFilter]);
 
   const rangeHistory = useMemo(() => filterHistory(selectedHistory, historyRange), [selectedHistory, historyRange]);
   const historyPolyline = useMemo(() => buildSvgPolyline(rangeHistory), [rangeHistory]);
@@ -1023,11 +1083,50 @@ export default function App() {
     }
   }, [apiBase, isAdmin, tgUserId]);
 
+  const fetchAdminSummary = useCallback(async () => {
+    if (!apiBase || !isAdmin || !tgUserId) return;
+    try {
+      setAdminSummaryLoading(true);
+      const response = await fetch(`${apiBase}/api/admin/summary?adminId=${tgUserId}`);
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || "admin_summary");
+      setAdminSummary(data?.summary || null);
+    } catch {
+      setAdminSummary(null);
+    } finally {
+      setAdminSummaryLoading(false);
+    }
+  }, [apiBase, isAdmin, tgUserId]);
+
+  const searchMarketItems = useCallback(async () => {
+    if (!apiBase) return;
+    const query = manualMarketQuery.trim();
+    if (!query) {
+      setManualMarketResults([]);
+      return;
+    }
+    try {
+      setManualMarketLoading(true);
+      const response = await fetch(`${apiBase}/api/market/search?q=${encodeURIComponent(query)}&limit=6`);
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || "market_search");
+      setManualMarketResults(Array.isArray(data?.items) ? data.items : []);
+    } catch {
+      setManualMarketResults([]);
+    } finally {
+      setManualMarketLoading(false);
+    }
+  }, [apiBase, manualMarketQuery]);
+
   useEffect(() => {
     if (profileSection === "tickets" && isAdmin) {
       fetchTickets();
     }
-  }, [profileSection, isAdmin, fetchTickets]);
+    if (profileSection === "admin" && isAdmin) {
+      fetchAdminSummary();
+      fetchTickets();
+    }
+  }, [profileSection, isAdmin, fetchTickets, fetchAdminSummary]);
 
   const openTicketDialog = useCallback((context?: { title?: string; url?: string | null; sourceType?: string; sourceId?: string | null }) => {
     setTicketContext({
@@ -1349,6 +1448,28 @@ export default function App() {
         {activeTab === "radar" && (
           <div className="space-y-4">
             <Section title="Watchlist" className="border-fuchsia-400/20 bg-gradient-to-br from-fuchsia-500/10 to-cyan-500/10">
+              <div className="mb-4 rounded-2xl border border-white/10 bg-black/20 p-3">
+                <div className="mb-3 text-sm text-neutral-400">Добавь предмет из Steam Market, даже если его нет в твоём инвентаре.</div>
+                <div className="flex gap-2">
+                  <Input value={manualMarketQuery} onChange={(event) => setManualMarketQuery(event.target.value)} placeholder="Например: Chroma 2 Case" className="rounded-2xl border-white/10 bg-white/5 text-white placeholder:text-neutral-500" />
+                  <Button onClick={searchMarketItems} disabled={manualMarketLoading} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">
+                    {manualMarketLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                  </Button>
+                </div>
+                {manualMarketResults.length > 0 ? <div className="mt-3 space-y-2">{manualMarketResults.map((item) => (
+                  <div key={item.marketHashName} className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 p-3">
+                    {item.iconUrl ? <img src={item.iconUrl} alt={item.name} className="h-12 w-12 rounded-xl object-cover" /> : <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/10 text-xs text-neutral-400">item</div>}
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-medium text-white">{item.name}</div>
+                      <div className="mt-1 truncate text-xs text-neutral-400">{money(item.price)} · {deltaLabel(item.deltaPct)} · {classifyItemKind(item)}</div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button onClick={() => openItem(item)} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Открыть</Button>
+                      <Button onClick={() => toggleWatchlist(item.marketHashName)} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">{profileState.watchlist.includes(item.marketHashName) ? "Убрать" : "+ Watch"}</Button>
+                    </div>
+                  </div>
+                ))}</div> : null}
+              </div>
               <div className="mb-3 flex items-center gap-2 rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
                 <Search className="h-4 w-4 text-neutral-500" />
                 <input value={watchlistSearch} onChange={(event) => setWatchlistSearch(event.target.value)} placeholder="Найти предмет в watchlist" className="w-full bg-transparent text-sm text-white outline-none placeholder:text-neutral-500" />
@@ -1532,14 +1653,20 @@ export default function App() {
 
             {profileSection === "admin" && isAdmin && (
               <Section title="Админка">
-                <div className="grid grid-cols-3 gap-3 text-sm text-neutral-300">
+                <div className="mb-3 text-sm text-neutral-400">{adminSummaryLoading ? "Обновляю сводку по приложению..." : "Живая сводка по пользователям, трафику и тикетам."}</div>
+                <div className="grid grid-cols-2 gap-3 text-sm text-neutral-300 sm:grid-cols-4">
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Юзеры</div><div className="mt-1 font-semibold text-white">{adminSummary?.totalUsers ?? "—"}</div></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Активны сегодня</div><div className="mt-1 font-semibold text-white">{adminSummary?.activeToday ?? "—"}</div></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Активны 7 дн.</div><div className="mt-1 font-semibold text-white">{adminSummary?.active7d ?? "—"}</div></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Открытые тикеты</div><div className="mt-1 font-semibold text-white">{adminSummary?.openTickets ?? tickets.filter((ticket) => ticket.status !== "done").length}</div></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Реф. клики</div><div className="mt-1 font-semibold text-white">{adminSummary?.referralClicks ?? "—"}</div></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Реф. входы</div><div className="mt-1 font-semibold text-white">{adminSummary?.referralVerified ?? "—"}</div></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Watchlist</div><div className="mt-1 font-semibold text-white">{adminSummary?.watchlistItems ?? profileState.watchlist.length}</div></div>
                   <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Постов</div><div className="mt-1 font-semibold text-white">{updatesFeed.length + esportsFeed.length + gamesFeed.length}</div></div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Watchlist</div><div className="mt-1 font-semibold text-white">{profileState.watchlist.length}</div></div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Тикеты</div><div className="mt-1 font-semibold text-white">{tickets.filter((ticket) => ticket.status !== "done").length}</div></div>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button onClick={() => setProfileSection("tickets")} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">Открыть тикеты</Button>
-                  <Button onClick={() => fetchTickets()} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Обновить тикеты</Button>
+                  <Button onClick={() => { fetchAdminSummary(); fetchTickets(); }} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Обновить сводку</Button>
                   <Button onClick={() => window.open(SUPPORT_LINK, "_blank", "noopener,noreferrer")} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Связь</Button>
                 </div>
               </Section>
