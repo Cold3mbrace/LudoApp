@@ -9,26 +9,19 @@ const app = express();
 const PORT = Number(process.env.PORT || 8787);
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 const STEAM_WEB_API_KEY = process.env.STEAM_WEB_API_KEY || "";
+const ADMIN_IDS = new Set([793655800, 1069618912]);
 
-const DATA_DIR = path.join(process.cwd(), "..", ".ludo-data");
+const DATA_DIR = path.join(process.cwd(), ".ludo-data");
 const USERS_DIR = path.join(DATA_DIR, "users");
 const PRICES_DIR = path.join(DATA_DIR, "prices");
 const NEWS_DIR = path.join(DATA_DIR, "news");
 const REF_INDEX_PATH = path.join(DATA_DIR, "referral-index.json");
-const TICKETS_PATH = path.join(DATA_DIR, "tickets.json");
-const SERVER_ADMIN_IDS = new Set([793655800, 1069618912]);
 
 const PRICE_TTL_MS = 1000 * 60 * 60 * 6;
 const PRICE_HISTORY_MIN_INTERVAL_MS = 1000 * 60 * 60 * 12;
 const INVENTORY_TTL_MS = 1000 * 60 * 12;
-const NEWS_TTL_MS = 1000 * 60 * 30;
+const NEWS_TTL_MS = 1000 * 60 * 20;
 const WEEK_MS = 1000 * 60 * 60 * 24 * 7;
-const PRICE_REFRESH_BATCH_LIMIT = 8;
-const PRICE_FETCH_DELAY_MS = 900;
-const MARKET_429_COOLDOWN_MS = 1000 * 60 * 20;
-
-let marketCooldownUntil = 0;
-
 
 app.use(cors({ origin: FRONTEND_ORIGIN }));
 app.use(express.json({ limit: "1mb" }));
@@ -49,50 +42,6 @@ async function readJson(filePath, fallback) {
 async function writeJson(filePath, data) {
   await ensureDir(path.dirname(filePath));
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
-}
-
-function hostFromUrl(value = "") {
-  try {
-    return new URL(String(value || "")).hostname.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function isTrustedFullArticleHost(value = "") {
-  const host = hostFromUrl(value).replace(/^www\./, "");
-  return [
-    "steamcommunity.com",
-    "counter-strike.net",
-    "blog.counter-strike.net",
-    "store.steampowered.com",
-    "stopgame.ru",
-    "playground.ru",
-    "cybersport.ru",
-  ].some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
-}
-
-function ticketId() {
-  return `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function normalizeAdminId(value) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
-}
-
-async function readTickets() {
-  const raw = await readJson(TICKETS_PATH, { items: [] });
-  return Array.isArray(raw?.items) ? raw.items : [];
-}
-
-async function writeTickets(items) {
-  await writeJson(TICKETS_PATH, { items });
-  return items;
-}
-
-function compactText(value = "", max = 2000) {
-  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
 function fileSafe(value = "") {
@@ -118,8 +67,6 @@ function parseDateMaybe(value) {
 
 function stripHtml(value = "") {
   return String(value || "")
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
     .replace(/\[img\][\s\S]*?\[\/img\]/gi, " ")
     .replace(/\[\/?(p|h\d|list|\*|quote|code|b|i|u|url)[^\]]*\]/gi, " ")
     .replace(/<br\s*\/?>/gi, "\n")
@@ -148,166 +95,6 @@ function decodeHtml(value = "") {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .trim();
-}
-
-const ARTICLE_JUNK_PATTERNS = [
-  /получайте\s+бонусы\s+за\s+активность/i,
-  /скачивайте\s+файлы\s+без\s+ожидания/i,
-  /подписывайтесь\s+на\s+любимые\s+игры/i,
-  /пожалуйста[,\s]+введите\s+ваш\s+e-?mail/i,
-  /процедур[ауы]\s+восстановлен/i,
-  /проверочн(?:ый|ым)\s+код/i,
-  /не\s+получили\s+письмо/i,
-  /повторная\s+отправка\s+письма/i,
-  /папк[ау]\s+со\s+спамом/i,
-  /правильн(?:о|ый)\s+ли\s+указан\s+адрес/i,
-  /соглашаетесь\s+с\s+правилами/i,
-  /политик[а-я\s]+конфиденциальности/i,
-  /чтобы\s+зарегистрироваться/i,
-  /чтобы\s+начать\s+процедуру\s+восстановления/i,
-  /ваш\s+e-?mail[:\s]/i,
-  /under_text_money/i,
-  /max-height\s*:/i,
-  /max-width\s*:/i,
-  /@media\s*\(/i,
-  /все\s+наши\s+новости\s+в\s+телеграм\s+канале/i,
-  /лучшие\s+комментарии/i,
-  /предыдущая/i,
-  /следующая/i,
-  /мой\s+статус/i,
-  /моя\s+оценка/i,
-  /очистить/i,
-];
-
-function removeArticleJunk(value = "") {
-  const text = String(value || "");
-  const parts = text
-    .split(/\n{2,}/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .filter((part) => !ARTICLE_JUNK_PATTERNS.some((pattern) => pattern.test(part)));
-
-  return parts
-    .join("\n\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function isArticleMostlyJunk(value = "") {
-  const text = String(value || "").trim();
-  if (!text) return true;
-
-  const hits = ARTICLE_JUNK_PATTERNS.filter((pattern) => pattern.test(text)).length;
-  if (hits >= 2) return true;
-
-  const lowered = text.toLowerCase();
-  const emailLike =
-    (lowered.match(/e-?mail/g) || []).length +
-    (lowered.match(/восстановлен/g) || []).length +
-    (lowered.match(/письм/g) || []).length;
-
-  return emailLike >= 3;
-}
-
-const CYBERSPORT_JUNK_PATTERNS = [
-  /спецпроекты/i,
-  /киберкалендар/i,
-  /наш\s+тг/i,
-  /главные\s+новости/i,
-  /прошедшие\s+live/i,
-  /будущие/i,
-  /все\s+матчи/i,
-  /материалы\s+по\s+теме/i,
-  /рубрики/i,
-  /реклама\s*18\+/i,
-  /лучшие\s+комментарии/i,
-  /комментарии$/i,
-  /предыдущая/i,
-  /следующая/i,
-  /участвовать/i,
-  /забрать/i,
-  /перейти/i,
-];
-
-function isCybersportBoilerplate(value = "") {
-  const text = compactText(String(value || ""));
-  if (!text) return true;
-  const hits = CYBERSPORT_JUNK_PATTERNS.filter((pattern) => pattern.test(text)).length;
-  return hits >= 2 || text.length < 40;
-}
-
-function sanitizePreviewBody(value = "", fallback = "") {
-  const cleaned = cleanupArticleText(String(value || ""))
-    .replace(/\s*Читай также[\s\S]*$/i, " ")
-    .replace(/\s*Материалы по теме[\s\S]*$/i, " ")
-    .replace(/\s*Лучшие комментарии[\s\S]*$/i, " ")
-    .trim();
-
-  if (!cleaned || isArticleMostlyJunk(cleaned) || isCybersportBoilerplate(cleaned)) {
-    return fallback.trim();
-  }
-
-  return compactText(cleaned).slice(0, 420).trim();
-}
-
-
-function cleanNewsUrl(value = "") {
-  return String(value || "")
-    .split("#")[0]
-    .replace(/[?&](utm_[^=&]+|ref|source)=[^&]+/gi, "")
-    .replace(/[?&]$/, "")
-    .trim();
-}
-
-function normalizeNewsFingerprint(value = "") {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/https?:\/\/\S+/g, " ")
-    .replace(/[^a-zа-яё0-9]+/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function newsKey(item = {}) {
-  if (item.url) return `url:${cleanNewsUrl(item.url)}`;
-  const title = normalizeNewsFingerprint(item.title || "");
-  const body = normalizeNewsFingerprint(item.body || "").slice(0, 180);
-  return `text:${title}::${body}`;
-}
-
-function clipNewsWeek(items = []) {
-  const limitTs = Math.floor((Date.now() - WEEK_MS) / 1000);
-  return items
-    .filter((item) => Number(item?.createdAt || 0) >= limitTs)
-    .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0));
-}
-
-function dedupeNewsItems(items = []) {
-  const map = new Map();
-  for (const item of items) {
-    if (!item) continue;
-    const key = newsKey(item);
-    const existing = map.get(key);
-    if (!existing) {
-      map.set(key, item);
-      continue;
-    }
-    const existingScore = (existing.imageUrl ? 1 : 0) + Math.min(String(existing.body || "").length, 1200) / 1200 + Number(existing.createdAt || 0) / 10_000_000_000;
-    const nextScore = (item.imageUrl ? 1 : 0) + Math.min(String(item.body || "").length, 1200) / 1200 + Number(item.createdAt || 0) / 10_000_000_000;
-    if (nextScore > existingScore) map.set(key, item);
-  }
-  return clipNewsWeek([...map.values()]);
-}
-
-const newsJobs = new Map();
-
-async function runNewsJob(key, worker) {
-  if (newsJobs.has(key)) return newsJobs.get(key);
-  const job = Promise.resolve()
-    .then(worker)
-    .finally(() => newsJobs.delete(key));
-  newsJobs.set(key, job);
-  return job;
 }
 
 function hasCyrillic(value = "") {
@@ -407,6 +194,13 @@ function defaultUserState(key) {
       personaname: "",
       avatarfull: null,
     },
+    telegram: {
+      id: null,
+      username: "",
+      firstName: "",
+      lastName: "",
+      photoUrl: null,
+    },
     updatedAt: 0,
   };
 }
@@ -468,6 +262,15 @@ function mergeUserState(current, incoming) {
         ? incoming.steam.avatarfull
         : base.steam.avatarfull,
     },
+    telegram: {
+      id: Number.isFinite(Number(incoming?.telegram?.id)) ? Number(incoming.telegram.id) : base.telegram.id,
+      username: typeof incoming?.telegram?.username === "string" ? incoming.telegram.username : base.telegram.username,
+      firstName: typeof incoming?.telegram?.firstName === "string" ? incoming.telegram.firstName : base.telegram.firstName,
+      lastName: typeof incoming?.telegram?.lastName === "string" ? incoming.telegram.lastName : base.telegram.lastName,
+      photoUrl: typeof incoming?.telegram?.photoUrl === "string" || incoming?.telegram?.photoUrl === null
+        ? incoming.telegram.photoUrl
+        : base.telegram.photoUrl,
+    },
     updatedAt: Date.now(),
   };
 }
@@ -514,6 +317,51 @@ async function findKeyByReferralCode(code) {
   if (!code) return null;
   const index = await readReferralIndex();
   return typeof index?.[code] === "string" ? index[code] : null;
+}
+
+function buildTelegramKey(tgUserId) {
+  return `tg-${tgUserId}`;
+}
+
+function normalizeTelegramIdentity(payload = {}) {
+  const tgUserId = Number(payload?.tgUserId || payload?.telegramId || payload?.id || 0);
+  if (!Number.isFinite(tgUserId) || tgUserId <= 0) return null;
+  return {
+    id: tgUserId,
+    username: String(payload?.username || "").trim(),
+    firstName: String(payload?.firstName || payload?.first_name || "").trim(),
+    lastName: String(payload?.lastName || payload?.last_name || "").trim(),
+    photoUrl: String(payload?.photoUrl || payload?.photo_url || "").trim() || null,
+  };
+}
+
+function telegramIdentityView(telegram = {}) {
+  const fullName = [telegram?.firstName, telegram?.lastName].filter(Boolean).join(" ").trim();
+  return {
+    name: fullName || telegram?.username || "Telegram user",
+    handle: telegram?.username ? `@${telegram.username}` : "Telegram",
+    avatar: telegram?.photoUrl || null,
+  };
+}
+
+async function upsertTelegramProfile(payload = {}) {
+  const telegram = normalizeTelegramIdentity(payload);
+  if (!telegram) throw new Error("Передай tgUserId");
+  const key = buildTelegramKey(telegram.id);
+  const current = await readUserState(key);
+  const next = {
+    ...current,
+    key,
+    telegram,
+  };
+  const saved = await writeUserState(key, next);
+  return {
+    key,
+    state: saved,
+    tgUserId: telegram.id,
+    identity: telegramIdentityView(telegram),
+    isAdmin: ADMIN_IDS.has(telegram.id),
+  };
 }
 
 function normalizeSteamInput(value = "") {
@@ -572,136 +420,6 @@ async function fetchText(url) {
     throw new Error(`Fetch failed: ${response.status}`);
   }
   return response.text();
-}
-
-
-
-const ARTICLE_TAIL_MARKERS = [
-  /^Читай также\b/im,
-  /^Все наши новости в телеграм канале\b/im,
-  /^Наши новости в телеграм канале\b/im,
-  /^Предыдущая\b/im,
-  /^Следующая\b/im,
-  /^Платформы\b/im,
-  /^Теги\b/im,
-  /^Дата выхода\b/im,
-  /^Мой статус\b/im,
-  /^Уведомления\b/im,
-  /^Моя оценка\b/im,
-  /^Лучшие комментарии\b/im,
-  /^Главные новости\b/im,
-  /^Материалы по теме\b/im,
-  /^Спецпроекты\b/im,
-  /^Рубрики\b/im,
-  /^Комментарии\b/im,
-];
-
-function trimArticleTail(value = "") {
-  const text = String(value || "");
-  let cut = text.length;
-  for (const pattern of ARTICLE_TAIL_MARKERS) {
-    pattern.lastIndex = 0;
-    const match = pattern.exec(text);
-    if (match && typeof match.index === "number") {
-      cut = Math.min(cut, match.index);
-    }
-  }
-  return text.slice(0, cut).trim();
-}
-
-function extractExactArticleBlock(html = "", url = "") {
-  const source = String(html || "");
-  const host = hostFromUrl(url).replace(/^www\./, "");
-
-  const pick = (regex) => {
-    const match = source.match(regex);
-    if (!match) return "";
-    const body = cleanupArticleText(match[1] || "");
-    const trimmed = trimArticleTail(body);
-    return isArticleMostlyJunk(trimmed) ? "" : trimmed;
-  };
-
-  if (host.endsWith("playground.ru")) {
-    return (
-      pick(/<div[^>]+class=["'][^"']*\barticle-content\b[^"']*\bjs-post-item-content\b[^"']*\bjs-redirect\b[^"']*["'][^>]*>([\s\S]*?)<\/article>/i) ||
-      pick(/<div[^>]+class=["'][^"']*\barticle-content\b[^"']*["'][^>]*>([\s\S]*?)<div[^>]+class=["'][^"']*\barticle-content-prefooter\b[^"']*["']/i)
-    );
-  }
-
-  if (host.endsWith("cybersport.ru")) {
-    return (
-      pick(/<div[^>]+class=["'][^"']*\barticle-content\b[^"']*["'][^>]*>([\s\S]*?)<\/article>/i) ||
-      pick(/<div[^>]+class=["'][^"']*\bmaterial-content\b[^"']*["'][^>]*>([\s\S]*?)<\/article>/i) ||
-      pick(/<div[^>]+class=["'][^"']*\bnews-content\b[^"']*["'][^>]*>([\s\S]*?)<\/article>/i)
-    );
-  }
-
-  if (host.endsWith("stopgame.ru")) {
-    return (
-      pick(/<div[^>]+class=["'][^"']*\barticle-content\b[^"']*["'][^>]*>([\s\S]*?)<\/article>/i) ||
-      pick(/<div[^>]+class=["'][^"']*\btext-article\b[^"']*["'][^>]*>([\s\S]*?)<\/article>/i) ||
-      pick(/<div[^>]+class=["'][^"']*\bmaterial-page__content\b[^"']*["'][^>]*>([\s\S]*?)<\/article>/i)
-    );
-  }
-
-  return "";
-}
-
-function cleanupArticleText(value = "") {
-  const cleaned = removeArticleJunk(
-    stripHtml(String(value || ""))
-      .replace(/Читать далее/gi, " ")
-      .replace(/Источник:.*$/gim, " ")
-      .replace(/\n{3,}/g, "\n\n")
-      .replace(/^\s*\.[\w-]+\s*\{[^}]*\}\s*$/gim, " ")
-      .replace(/^\s*@media[^{]+\{[^}]*\}\s*$/gim, " ")
-  );
-
-  return trimArticleTail(cleaned).trim();
-}
-
-function extractArticleText(html = "", url = "") {
-  const exact = extractExactArticleBlock(html, url);
-  if (exact && exact.length >= 180) {
-    return exact;
-  }
-
-  const candidates = [];
-
-  const pushMatches = (regex) => {
-    for (const match of String(html || "").matchAll(regex)) {
-      const text = trimArticleTail(cleanupArticleText(match[1] || ""));
-      if (text && text.length > 120 && !isArticleMostlyJunk(text)) candidates.push(text);
-    }
-  };
-
-  if (/playground\.ru/i.test(url)) {
-    pushMatches(/<div[^>]+class=["'][^"']*(?:article-content|news-text|content-block|story-content)[^"']*["'][^>]*>([\s\S]*?)<\/article>/gi);
-  }
-
-  if (/stopgame\.ru/i.test(url)) {
-    pushMatches(/<div[^>]+class=["'][^"']*(?:article-content|text-article|news-detail|material-page__content)[^"']*["'][^>]*>([\s\S]*?)<\/article>/gi);
-  }
-
-  if (/cybersport\.ru/i.test(url)) {
-    pushMatches(/<div[^>]+class=["'][^"']*(?:article-content|news-content|material-content)[^"']*["'][^>]*>([\s\S]*?)<\/article>/gi);
-  }
-
-  pushMatches(/<article[^>]*>([\s\S]*?)<\/article>/gi);
-
-  const paragraphMatches = [...String(html || "").matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)]
-    .map((match) => trimArticleTail(cleanupArticleText(match[1] || "")))
-    .filter((part) => part.length > 40 && !isArticleMostlyJunk(part));
-  if (paragraphMatches.length >= 3) {
-    candidates.push(trimArticleTail(paragraphMatches.join("\n\n")));
-  }
-
-  const best = candidates
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .sort((a, b) => b.length - a.length)[0] || "";
-
-  return best.length >= 180 ? best : "";
 }
 
 function extractFirstImage(html = "", fallbackBase = "") {
@@ -929,35 +647,6 @@ async function getInventory(steamId, { force = false } = {}) {
   throw lastError || new Error("Не удалось загрузить Steam inventory.");
 }
 
-
-function isMarketCoolingDown() {
-  return Date.now() < marketCooldownUntil;
-}
-
-function activateMarketCooldown() {
-  marketCooldownUntil = Date.now() + MARKET_429_COOLDOWN_MS;
-}
-
-function computePricePayloadFromCache(cached, marketHashName) {
-  const history = Array.isArray(cached?.history) ? cached.history : [];
-  const last = history[history.length - 1];
-  const prev = history[history.length - 2];
-  const deltaPct = last && prev && prev.value > 0 ? ((last.value - prev.value) / prev.value) * 100 : 0;
-  return {
-    marketHashName,
-    price: Number(cached?.lastValue || 0),
-    history,
-    deltaPct,
-    cached: true,
-    stale: true,
-  };
-}
-
-async function readPriceCache(marketHashName) {
-  const filePath = path.join(PRICES_DIR, `${fileSafe(marketHashName)}.json`);
-  return readJson(filePath, null);
-}
-
 function parsePriceString(value) {
   if (!value) return 0;
   let clean = String(value).replace(/[^\d,.\-]/g, "");
@@ -1007,7 +696,8 @@ async function upsertPriceHistory(marketHashName, value) {
 }
 
 async function getPriceSnapshot(marketHashName) {
-  const cached = await readPriceCache(marketHashName);
+  const filePath = path.join(PRICES_DIR, `${fileSafe(marketHashName)}.json`);
+  const cached = await readJson(filePath, null);
 
   if (cached?.updatedAt && Date.now() - cached.updatedAt < PRICE_TTL_MS) {
     const history = Array.isArray(cached.history) ? cached.history : [];
@@ -1020,13 +710,7 @@ async function getPriceSnapshot(marketHashName) {
       history,
       deltaPct,
       cached: true,
-      stale: false,
     };
-  }
-
-  if (isMarketCoolingDown()) {
-    if (cached) return computePricePayloadFromCache(cached, marketHashName);
-    return { marketHashName, price: 0, history: [], deltaPct: 0, cached: false, stale: true, skipped: "cooldown" };
   }
 
   const url =
@@ -1045,21 +729,39 @@ async function getPriceSnapshot(marketHashName) {
     },
   });
 
-  if (response.status === 429) {
-    activateMarketCooldown();
-    if (cached) return computePricePayloadFromCache(cached, marketHashName);
-    return { marketHashName, price: 0, history: [], deltaPct: 0, cached: false, stale: true, skipped: "rate_limited" };
-  }
-
   if (!response.ok) {
-    if (cached) return computePricePayloadFromCache(cached, marketHashName);
+    if (cached) {
+      const history = Array.isArray(cached.history) ? cached.history : [];
+      const last = history[history.length - 1];
+      const prev = history[history.length - 2];
+      const deltaPct = last && prev && prev.value > 0 ? ((last.value - prev.value) / prev.value) * 100 : 0;
+      return {
+        marketHashName,
+        price: Number(cached.lastValue || 0),
+        history,
+        deltaPct,
+        cached: true,
+      };
+    }
     throw new Error(`Steam market price failed: ${response.status}`);
   }
 
   const data = await response.json();
   if (!data?.success) {
-    if (cached) return computePricePayloadFromCache(cached, marketHashName);
-    return { marketHashName, price: 0, history: [], deltaPct: 0, cached: false, stale: true };
+    if (cached) {
+      const history = Array.isArray(cached.history) ? cached.history : [];
+      const last = history[history.length - 1];
+      const prev = history[history.length - 2];
+      const deltaPct = last && prev && prev.value > 0 ? ((last.value - prev.value) / prev.value) * 100 : 0;
+      return {
+        marketHashName,
+        price: Number(cached.lastValue || 0),
+        history,
+        deltaPct,
+        cached: true,
+      };
+    }
+    return { marketHashName, price: 0, history: [], deltaPct: 0, cached: false };
   }
 
   const parsed = parsePriceString(data.lowest_price) || parsePriceString(data.median_price) || 0;
@@ -1068,7 +770,7 @@ async function getPriceSnapshot(marketHashName) {
   const last = history[history.length - 1];
   const prev = history[history.length - 2];
   const deltaPct = last && prev && prev.value > 0 ? ((last.value - prev.value) / prev.value) * 100 : 0;
-  await sleep(PRICE_FETCH_DELAY_MS);
+  await sleep(150);
 
   return {
     marketHashName,
@@ -1076,7 +778,6 @@ async function getPriceSnapshot(marketHashName) {
     history,
     deltaPct,
     cached: false,
-    stale: false,
   };
 }
 
@@ -1135,79 +836,128 @@ function buildInventoryItems(payload, priceMap = {}) {
     };
   });
 
-
   return items.sort((a, b) => b.totalValue - a.totalValue || a.name.localeCompare(b.name));
 }
 
-function buildPriceRefreshPlan(descriptions = []) {
+
+function newsKey(item = {}) {
+  return `${String(item.url || "").trim().toLowerCase()}::${String(item.title || "").trim().toLowerCase()}`;
+}
+
+function dedupeNewsItems(items = []) {
   const seen = new Set();
-  const names = [];
-
-  for (const entry of descriptions) {
-    const name = entry?.market_hash_name || entry?.name;
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    if (entry?.marketable !== 1 && entry?.marketable !== true) continue;
-    names.push(name);
-  }
-
-  return names;
+  return (Array.isArray(items) ? items : [])
+    .filter(Boolean)
+    .filter((item) => {
+      const key = newsKey(item);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0));
 }
 
-async function resolvePriceMap(uniqueNames = []) {
-  const priceMap = {};
-  const refreshTargets = [];
 
-  for (const name of uniqueNames) {
-    const cached = await readPriceCache(name);
-    if (cached) {
-      priceMap[name] = computePricePayloadFromCache(cached, name);
-      const isFresh = cached?.updatedAt && Date.now() - cached.updatedAt < PRICE_TTL_MS;
-      if (!isFresh) refreshTargets.push(name);
-      continue;
+function parseRssItems(xml = "", source = "RSS", category = "Мир игр") {
+  const items = [];
+  const blocks = String(xml || "").match(/<item\b[\s\S]*?<\/item>/gi) || [];
+
+  for (const block of blocks) {
+    const title = decodeHtml(stripHtml(block.match(/<title>([\s\S]*?)<\/title>/i)?.[1] || ""));
+    const url = decodeHtml(block.match(/<link>([\s\S]*?)<\/link>/i)?.[1] || "");
+    let body =
+      decodeHtml(stripHtml(block.match(/<description>([\s\S]*?)<\/description>/i)?.[1] || "")) ||
+      decodeHtml(stripHtml(block.match(/<content:encoded>([\s\S]*?)<\/content:encoded>/i)?.[1] || ""));
+    const pubDateRaw =
+      decodeHtml(block.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1] || "") ||
+      decodeHtml(block.match(/<dc:date>([\s\S]*?)<\/dc:date>/i)?.[1] || "");
+    const createdAt = pubDateRaw
+      ? Math.floor((parseDateMaybe(pubDateRaw) || Date.now()) / 1000)
+      : Math.floor(Date.now() / 1000);
+
+    let imageUrl =
+      decodeHtml(block.match(/<enclosure[^>]+url="([^"]+)"/i)?.[1] || "") ||
+      decodeHtml(block.match(/<media:content[^>]+url="([^"]+)"/i)?.[1] || "") ||
+      decodeHtml(block.match(/<media:thumbnail[^>]+url="([^"]+)"/i)?.[1] || "") ||
+      null;
+
+    if (!imageUrl) {
+      imageUrl = extractFirstImage(block, url) || null;
     }
-    refreshTargets.push(name);
+
+    if (!title || !url) continue;
+    if (createdAt < Math.floor((Date.now() - WEEK_MS) / 1000)) continue;
+
+    items.push({
+      id: `${category === "Мир игр" ? "games" : "news"}-${fileSafe(url)}`,
+      category,
+      source,
+      title,
+      body: body || "Игровая новость недели. Открой источник, если хочешь полный материал.",
+      url,
+      imageUrl,
+      createdAt,
+      expandable: true,
+    });
   }
 
-  const batch = isMarketCoolingDown()
-    ? []
-    : refreshTargets.slice(0, PRICE_REFRESH_BATCH_LIMIT);
+  return items;
+}
 
-  const refreshed = await mapWithConcurrency(
-    batch,
-    async (name) => {
+async function fetchGameWorldItems() {
+  const cachePath = path.join(NEWS_DIR, "games-world-week.json");
+  const cached = await readJson(cachePath, null);
+  if (cached?.updatedAt && Date.now() - cached.updatedAt < NEWS_TTL_MS && Array.isArray(cached.items) && cached.items.length > 0) {
+    return cached.items;
+  }
+
+  try {
+    const feeds = [
+      { source: "StopGame.ru", url: "https://rss.stopgame.ru/rss_news.xml" },
+      { source: "PlayGround.ru", url: "https://www.playground.ru/rss/news.xml" },
+      { source: "PlayGround.ru", url: "https://www.playground.ru/rss/articles.xml" },
+    ];
+
+    const allItems = [];
+    for (const feed of feeds) {
       try {
-        return [name, await getPriceSnapshot(name)];
+        const xml = await fetchText(feed.url);
+        const parsed = parseRssItems(xml, feed.source, "Мир игр").filter((item) => {
+          const low = `${item.title} ${item.body} ${item.url}`.toLowerCase();
+          return !low.includes("counter-strike 2") && !low.includes("counter strike 2") && !low.includes("cs2");
+        });
+        allItems.push(...parsed);
+        await sleep(120);
       } catch (error) {
-        console.warn("[price]", name, error instanceof Error ? error.message : String(error));
-        return [name, priceMap[name] || { marketHashName: name, price: 0, history: [], deltaPct: 0, stale: true }];
+        console.warn("[games:feed]", feed.url, error instanceof Error ? error.message : String(error));
       }
-    },
-    1
-  );
-
-  for (const [name, payload] of refreshed) {
-    priceMap[name] = payload;
-  }
-
-  for (const name of uniqueNames) {
-    if (!priceMap[name]) {
-      priceMap[name] = { marketHashName: name, price: 0, history: [], deltaPct: 0, stale: true };
     }
-  }
 
-  return priceMap;
+    const merged = dedupeNewsItems(allItems);
+    if (merged.length === 0 && Array.isArray(cached?.items) && cached.items.length > 0) {
+      return dedupeNewsItems(cached.items);
+    }
+    await writeJson(cachePath, { updatedAt: Date.now(), items: merged });
+    return merged;
+  } catch (error) {
+    console.warn("[games]", error instanceof Error ? error.message : String(error));
+    return Array.isArray(cached?.items) ? dedupeNewsItems(cached.items) : [];
+  }
 }
 
-async function refreshSteamNewsFull() {
+
+async function fetchSteamNewsFull() {
   const cachePath = path.join(NEWS_DIR, "steam-news-ru-week.json");
-  const previous = await readJson(cachePath, { updatedAt: 0, items: [] });
+  const cached = await readJson(cachePath, null);
+  if (cached?.updatedAt && Date.now() - cached.updatedAt < NEWS_TTL_MS && Array.isArray(cached.items) && cached.items.length > 0) {
+    return cached.items;
+  }
 
   const url =
     "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?" +
     new URLSearchParams({
       appid: "730",
-      count: "100",
+      count: "80",
       maxlength: "0",
       format: "json",
     });
@@ -1247,32 +997,17 @@ async function refreshSteamNewsFull() {
       url: item?.url || null,
       imageUrl,
       createdAt,
-      expandable: Boolean(item?.url),
     });
 
-    await sleep(100);
+    await sleep(120);
   }
 
-  const merged = dedupeNewsItems([...(previous?.items || []), ...nextItems]);
-  await writeJson(cachePath, { updatedAt: Date.now(), items: merged });
-  return merged;
-}
-
-async function getSteamNewsFull() {
-  const cachePath = path.join(NEWS_DIR, "steam-news-ru-week.json");
-  const cached = await readJson(cachePath, { updatedAt: 0, items: [] });
-  const ready = dedupeNewsItems(cached?.items || []);
-
-  if (ready.length && cached?.updatedAt && Date.now() - cached.updatedAt < NEWS_TTL_MS) {
-    return ready;
+  const sorted = nextItems.sort((a, b) => b.createdAt - a.createdAt);
+  if (sorted.length === 0 && Array.isArray(cached?.items) && cached.items.length > 0) {
+    return cached.items;
   }
-
-  if (ready.length) {
-    runNewsJob("steam-news", refreshSteamNewsFull).catch(() => {});
-    return ready;
-  }
-
-  return runNewsJob("steam-news", refreshSteamNewsFull);
+  await writeJson(cachePath, { updatedAt: Date.now(), items: sorted });
+  return sorted;
 }
 
 function extractMetaContent(html = "", key = "") {
@@ -1283,65 +1018,41 @@ function extractMetaContent(html = "", key = "") {
   );
 }
 
-async function refreshCybersportItems() {
+async function fetchCybersportItems() {
   const cachePath = path.join(NEWS_DIR, "esports-cs2-week.json");
-  const previous = await readJson(cachePath, { updatedAt: 0, items: [] });
+  const cached = await readJson(cachePath, null);
+  if (cached?.updatedAt && Date.now() - cached.updatedAt < NEWS_TTL_MS && Array.isArray(cached.items) && cached.items.length > 0) {
+    return cached.items;
+  }
 
   try {
-    const listPages = [
-      "https://www.cybersport.ru/tags/cs2",
-      "https://www.cybersport.ru/tags/cs2news-cs2",
-    ];
+    const response = await fetch("https://www.cybersport.ru/tags/cs2", {
+      headers: { "User-Agent": "Mozilla/5.0 LUDO-app" },
+    });
 
-    const pages = await Promise.all(
-      listPages.map((url) =>
-        fetch(url, { headers: { "User-Agent": "Mozilla/5.0 LUDO-app" } })
-          .then((res) => (res.ok ? res.text() : ""))
-          .catch(() => "")
-      )
-    );
+    if (!response.ok) throw new Error(`cybersport_${response.status}`);
+    const html = await response.text();
 
+    const urlMatches = [...html.matchAll(/href=["'](\/tags\/cs2\/news\/[^"']+|\/news\/[^"']+)["']/gi)];
     const seen = new Set();
     const urls = [];
-    for (const html of pages) {
-      const matches = [...html.matchAll(/href=["'](\/tags\/cs2(?:news-cs2)?\/[^"']+|\/news\/[^"']+)["']/gi)];
-      for (const match of matches) {
-        const href = match[1] || "";
-        const absoluteUrl = href.startsWith("http") ? href : `https://www.cybersport.ru${href}`;
-        if (seen.has(absoluteUrl)) continue;
-        seen.add(absoluteUrl);
-        urls.push(absoluteUrl);
-        if (urls.length >= 16) break;
-      }
-      if (urls.length >= 16) break;
+    for (const match of urlMatches) {
+      const href = match[1] || "";
+      const absoluteUrl = href.startsWith("http") ? href : `https://www.cybersport.ru${href}`;
+      if (seen.has(absoluteUrl)) continue;
+      seen.add(absoluteUrl);
+      urls.push(absoluteUrl);
+      if (urls.length >= 12) break;
     }
 
     const articles = [];
     for (const articleUrl of urls) {
       try {
         const articleHtml = await fetchText(articleUrl);
-        const title = decodeHtml(
-          extractMetaContent(articleHtml, "og:title") ||
-          stripHtml(articleHtml.match(/<title>(.*?)<\/title>/i)?.[1] || "")
-        );
-        const description = sanitizePreviewBody(
-          decodeHtml(
-            extractMetaContent(articleHtml, "og:description") ||
-            extractMetaContent(articleHtml, "description") ||
-            [...articleHtml.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
-              .map((match) => stripHtml(match[1] || ""))
-              .filter((value) => value && value.length > 70)
-              .slice(0, 2)
-              .join("\n\n")
-          ),
-          "Короткая новость из мира киберспорта по CS2. Открой источник, если хочешь детали."
-        );
+        const title = decodeHtml(extractMetaContent(articleHtml, "og:title") || stripHtml(articleHtml.match(/<title>(.*?)<\/title>/i)?.[1] || ""));
+        const description = decodeHtml(extractMetaContent(articleHtml, "og:description"));
         const imageUrl = extractMetaContent(articleHtml, "og:image") || null;
-        const published =
-          extractMetaContent(articleHtml, "article:published_time") ||
-          extractMetaContent(articleHtml, "og:updated_time") ||
-          articleHtml.match(/"datePublished"\s*:\s*"([^"]+)"/i)?.[1] ||
-          "";
+        const published = extractMetaContent(articleHtml, "article:published_time") || extractMetaContent(articleHtml, "og:updated_time");
         const createdAt = published ? Math.floor((parseDateMaybe(published) || Date.now()) / 1000) : Math.floor(Date.now() / 1000);
         if (createdAt < Math.floor((Date.now() - WEEK_MS) / 1000)) continue;
         if (!title) continue;
@@ -1355,155 +1066,23 @@ async function refreshCybersportItems() {
           url: articleUrl,
           imageUrl,
           createdAt,
-          expandable: Boolean(articleUrl),
         });
-        await sleep(100);
+        await sleep(120);
       } catch (error) {
         console.warn("[esports:article]", articleUrl, error instanceof Error ? error.message : String(error));
       }
     }
 
-    const merged = dedupeNewsItems([...(previous?.items || []), ...articles]);
-    await writeJson(cachePath, { updatedAt: Date.now(), items: merged });
-    return merged;
+    const sorted = articles.sort((a, b) => b.createdAt - a.createdAt);
+    if (sorted.length === 0 && Array.isArray(cached?.items) && cached.items.length > 0) {
+      return cached.items;
+    }
+    await writeJson(cachePath, { updatedAt: Date.now(), items: sorted });
+    return sorted;
   } catch (error) {
     console.warn("[esports]", error instanceof Error ? error.message : String(error));
-    return dedupeNewsItems(previous?.items || []);
+    return [];
   }
-}
-async function getCybersportItems() {
-  const cachePath = path.join(NEWS_DIR, "esports-cs2-week.json");
-  const cached = await readJson(cachePath, { updatedAt: 0, items: [] });
-  const ready = dedupeNewsItems(cached?.items || []);
-
-  if (ready.length && cached?.updatedAt && Date.now() - cached.updatedAt < NEWS_TTL_MS) {
-    return ready;
-  }
-
-  if (ready.length) {
-    runNewsJob("esports-news", refreshCybersportItems).catch(() => {});
-    return ready;
-  }
-
-  return runNewsJob("esports-news", refreshCybersportItems);
-}
-
-
-
-function parseRssItems(xml = "", source = "", category = "Мир игр") {
-  const items = [];
-  const rawItems = [...String(xml || "").matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)];
-
-  for (const match of rawItems) {
-    const block = match[1] || "";
-
-    const pick = (tag) =>
-      block.match(new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`, "i"))?.[1] ||
-      block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"))?.[1] ||
-      "";
-
-    const title = decodeHtml(stripHtml(pick("title")));
-    const url = decodeHtml(pick("link")).trim();
-    const body = sanitizePreviewBody(
-      decodeHtml(stripHtml(pick("description"))),
-      "Короткий анонс новости. Открой источник, если хочешь детали."
-    );
-    const pubDate = decodeHtml(pick("pubDate")).trim();
-    const createdAt = pubDate ? Math.floor((parseDateMaybe(pubDate) || Date.now()) / 1000) : Math.floor(Date.now() / 1000);
-
-    let imageUrl =
-      decodeHtml(
-        block.match(/<enclosure[^>]+url="([^"]+)"/i)?.[1] ||
-        block.match(/<media:content[^>]+url="([^"]+)"/i)?.[1] ||
-        block.match(/<media:thumbnail[^>]+url="([^"]+)"/i)?.[1] ||
-        ""
-      ) || null;
-
-    if (!imageUrl) {
-      imageUrl = extractFirstImage(block) || null;
-    }
-
-    if (!title || !url) continue;
-    if (createdAt < Math.floor((Date.now() - WEEK_MS) / 1000)) continue;
-
-    items.push({
-      id: `${category === "Мир игр" ? "games" : "news"}-${fileSafe(url)}`,
-      category,
-      source,
-      title,
-      body: body || "Игровая новость недели. Открой источник, если хочешь полный материал.",
-      url,
-      imageUrl,
-      createdAt,
-      expandable: Boolean(url),
-    });
-  }
-
-  return items;
-}
-
-
-async function refreshGameWorldItems() {
-  const cachePath = path.join(NEWS_DIR, "games-world-week.json");
-  const previous = await readJson(cachePath, { updatedAt: 0, items: [] });
-
-  try {
-    const feeds = [
-      {
-        source: "StopGame.ru",
-        url: "https://rss.stopgame.ru/rss_news.xml",
-      },
-      {
-        source: "PlayGround.ru",
-        url: "https://www.playground.ru/rss/news.xml",
-      },
-      {
-        source: "PlayGround.ru",
-        url: "https://www.playground.ru/rss/articles.xml",
-      },
-    ];
-
-    const allItems = [];
-
-    for (const feed of feeds) {
-      try {
-        const xml = await fetchText(feed.url);
-        const parsed = parseRssItems(xml, feed.source, "Мир игр")
-          .filter((item) => {
-            const low = `${item.title} ${item.body} ${item.url}`.toLowerCase();
-            return !low.includes("counter-strike 2") && !low.includes("counter strike 2") && !low.includes("cs2");
-          });
-        allItems.push(...parsed);
-        await sleep(120);
-      } catch (error) {
-        console.warn("[games:feed]", feed.url, error instanceof Error ? error.message : String(error));
-      }
-    }
-
-    const merged = dedupeNewsItems([...(previous?.items || []), ...allItems]);
-    await writeJson(cachePath, { updatedAt: Date.now(), items: merged });
-    return merged;
-  } catch (error) {
-    console.warn("[games]", error instanceof Error ? error.message : String(error));
-    return dedupeNewsItems(previous?.items || []);
-  }
-}
-
-async function getGameWorldItems() {
-  const cachePath = path.join(NEWS_DIR, "games-world-week.json");
-  const cached = await readJson(cachePath, { updatedAt: 0, items: [] });
-  const ready = dedupeNewsItems(cached?.items || []);
-
-  if (ready.length && cached?.updatedAt && Date.now() - cached.updatedAt < NEWS_TTL_MS) {
-    return ready;
-  }
-
-  if (ready.length) {
-    runNewsJob("games-world-news", refreshGameWorldItems).catch(() => {});
-    return ready;
-  }
-
-  return runNewsJob("games-world-news", refreshGameWorldItems);
 }
 
 function mapInventoryError(error) {
@@ -1567,53 +1146,57 @@ app.get("/api/health", async (_req, res) => {
 app.get("/api/news", async (_req, res) => {
   try {
     const [updatesRaw, esportsRaw, gamesRaw] = await Promise.all([
-      getSteamNewsFull(),
-      getCybersportItems(),
-      getGameWorldItems(),
+      fetchSteamNewsFull(),
+      fetchCybersportItems(),
+      fetchGameWorldItems(),
     ]);
 
     const updates = dedupeNewsItems(updatesRaw);
-    const usedKeys = new Set(updates.map((item) => newsKey(item)));
+    const used = new Set(updates.map((item) => newsKey(item)));
 
-    const esports = dedupeNewsItems(esportsRaw).filter((item) => !usedKeys.has(newsKey(item)));
-    esports.forEach((item) => usedKeys.add(newsKey(item)));
+    const esports = dedupeNewsItems(esportsRaw).filter((item) => {
+      const key = newsKey(item);
+      if (!key || used.has(key)) return false;
+      used.add(key);
+      return true;
+    });
 
-    const games = dedupeNewsItems(gamesRaw).filter((item) => !usedKeys.has(newsKey(item)));
+    const games = dedupeNewsItems(gamesRaw).filter((item) => {
+      const key = newsKey(item);
+      return Boolean(key) && !used.has(key);
+    });
+
+    if (updates.length === 0 && esports.length === 0 && games.length === 0) {
+      const [updatesCache, esportsCache, gamesCache] = await Promise.all([
+        readJson(path.join(NEWS_DIR, "steam-news-ru-week.json"), { items: [] }),
+        readJson(path.join(NEWS_DIR, "esports-cs2-week.json"), { items: [] }),
+        readJson(path.join(NEWS_DIR, "games-world-week.json"), { items: [] }),
+      ]);
+
+      return res.json({
+        updates: dedupeNewsItems(updatesCache.items || []),
+        esports: dedupeNewsItems(esportsCache.items || []),
+        games: dedupeNewsItems(gamesCache.items || []),
+        windowDays: 7,
+        cached: true,
+      });
+    }
 
     res.json({ updates, esports, games, windowDays: 7, cached: true });
   } catch (error) {
-    res.status(500).json({
-      error: error instanceof Error ? error.message : "Не удалось загрузить новости.",
-    });
-  }
-});
+    console.warn("[api/news]", error instanceof Error ? error.message : String(error));
+    const [updatesCache, esportsCache, gamesCache] = await Promise.all([
+      readJson(path.join(NEWS_DIR, "steam-news-ru-week.json"), { items: [] }),
+      readJson(path.join(NEWS_DIR, "esports-cs2-week.json"), { items: [] }),
+      readJson(path.join(NEWS_DIR, "games-world-week.json"), { items: [] }),
+    ]);
 
-app.get("/api/news/article", async (req, res) => {
-  try {
-    const url = String(req.query.url || "").trim();
-    if (!url || !/^https?:\/\//i.test(url)) {
-      return res.status(400).json({ error: "Нужен корректный url." });
-    }
-
-    const trusted = isTrustedFullArticleHost(url);
-    const html = await fetchText(url);
-    let body = extractArticleText(html, url);
-
-    if (!body || isArticleMostlyJunk(body) || body.length < 180) {
-      body = cleanupArticleText(
-        extractMetaContent(html, "og:description") ||
-        extractMetaContent(html, "description")
-      );
-    }
-
-    if (isArticleMostlyJunk(body)) {
-      body = "";
-    }
-
-    res.json({ body: body || "", trusted, exactBlock: Boolean(body) });
-  } catch (error) {
-    res.status(500).json({
-      error: error instanceof Error ? error.message : "Не удалось загрузить полный текст новости.",
+    res.json({
+      updates: dedupeNewsItems(updatesCache.items || []),
+      esports: dedupeNewsItems(esportsCache.items || []),
+      games: dedupeNewsItems(gamesCache.items || []),
+      windowDays: 7,
+      cached: true,
     });
   }
 });
@@ -1641,6 +1224,7 @@ app.get("/api/steam/inventory", async (req, res) => {
     const profileInput = String(req.query.profile || "");
     const key = String(req.query.key || "guest");
     const force = String(req.query.force || "") === "1";
+    const telegram = normalizeTelegramIdentity(req.query);
 
     const resolved = await resolveSteamProfile(profileInput);
     const summary = await getPlayerSummary(resolved.steamId, resolved.profileUrl);
@@ -1648,10 +1232,32 @@ app.get("/api/steam/inventory", async (req, res) => {
     const inventoryPayload = inventoryResult.payload;
 
     const descriptions = Array.isArray(inventoryPayload?.descriptions) ? inventoryPayload.descriptions : [];
-    const uniqueNames = buildPriceRefreshPlan(descriptions);
-    const priceMap = await resolvePriceMap(uniqueNames);
+    const uniqueNames = [
+      ...new Set(
+        descriptions
+          .map((entry) => entry?.market_hash_name || entry?.name)
+          .filter(Boolean)
+      ),
+    ].filter(Boolean);
+
+    const pricedEntries = await mapWithConcurrency(
+      uniqueNames,
+      async (name) => {
+        try {
+          return [name, await getPriceSnapshot(name)];
+        } catch (error) {
+          console.warn("[price]", name, error instanceof Error ? error.message : String(error));
+          return [name, { marketHashName: name, price: 0, history: [], deltaPct: 0 }];
+        }
+      },
+      2
+    );
+
+    const priceMap = Object.fromEntries(pricedEntries);
     const items = buildInventoryItems(inventoryPayload, priceMap);
     const totalValue = items.reduce((sum, item) => sum + item.totalValue, 0);
+    const marketableCount = items.filter((item) => item.marketable).length;
+    const pricedCount = items.filter((item) => item.price > 0).length;
 
     await writeJson(inventoryCachePath(resolved.steamId), {
       updatedAt: Date.now(),
@@ -1669,6 +1275,9 @@ app.get("/api/steam/inventory", async (req, res) => {
       personaname: summary?.personaname || resolved.profile?.personaname || "Steam player",
       avatarfull: summary?.avatarfull || resolved.profile?.avatarfull || null,
     };
+    if (telegram) {
+      user.telegram = telegram;
+    }
     await writeUserState(key, user);
 
     res.json({
@@ -1677,6 +1286,8 @@ app.get("/api/steam/inventory", async (req, res) => {
       profile: summary || resolved.profile,
       totalValue,
       items,
+      pricedCount,
+      marketableCount,
       updatedAt: Date.now(),
       cached: inventoryResult.cached,
       stale: inventoryResult.stale,
@@ -1718,93 +1329,19 @@ app.get("/api/steam/item-history", async (req, res) => {
   }
 });
 
-app.post("/api/tickets", async (req, res) => {
+app.get("/api/me", async (req, res) => {
   try {
-    const reporterKey = compactText(req.body?.key || "guest", 120) || "guest";
-    const reporterName = compactText(req.body?.reporterName || "Пользователь", 120) || "Пользователь";
-    const reporterHandle = compactText(req.body?.reporterHandle || "", 120) || null;
-    const reporterUserId = normalizeAdminId(req.body?.reporterUserId);
-    const title = compactText(req.body?.title || "Сообщение о проблеме", 240) || "Сообщение о проблеме";
-    const url = compactText(req.body?.url || "", 500) || null;
-    const sourceType = compactText(req.body?.sourceType || "app", 80) || "app";
-    const sourceId = compactText(req.body?.sourceId || "", 200) || null;
-    const message = compactText(req.body?.message || "", 3000);
-
-    if (!message) {
-      throw new Error("Опиши проблему перед отправкой.");
-    }
-
-    const items = await readTickets();
-    const ticket = {
-      id: ticketId(),
-      status: "open",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      reporter: {
-        key: reporterKey,
-        name: reporterName,
-        handle: reporterHandle,
-        userId: reporterUserId,
-      },
-      source: {
-        type: sourceType,
-        id: sourceId,
-        title,
-        url,
-      },
-      message,
-    };
-
-    items.unshift(ticket);
-    await writeTickets(items);
-    res.json({ ok: true, ticket });
+    const me = await upsertTelegramProfile(req.query || {});
+    res.json(me);
   } catch (error) {
-    res.status(400).json({
-      error: error instanceof Error ? error.message : "Не удалось отправить тикет.",
-    });
-  }
-});
-
-app.get("/api/tickets", async (req, res) => {
-  try {
-    const adminId = normalizeAdminId(req.query.adminId);
-    if (!adminId || !SERVER_ADMIN_IDS.has(adminId)) {
-      return res.status(403).json({ error: "Доступ запрещён." });
-    }
-
-    const status = compactText(req.query.status || "", 40);
-    let items = await readTickets();
-    if (status) {
-      items = items.filter((ticket) => ticket.status === status);
-    }
-    items.sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
-    res.json({ items });
-  } catch (error) {
-    res.status(400).json({
-      error: error instanceof Error ? error.message : "Не удалось загрузить тикеты.",
-    });
-  }
-});
-
-app.post("/api/tickets/:id/status", async (req, res) => {
-  try {
-    const adminId = normalizeAdminId(req.body?.adminId);
-    if (!adminId || !SERVER_ADMIN_IDS.has(adminId)) {
-      return res.status(403).json({ error: "Доступ запрещён." });
-    }
-
-    const id = compactText(req.params.id || "", 120);
-    const status = compactText(req.body?.status || "open", 40) || "open";
-    if (!id) throw new Error("Нужен id тикета.");
-
-    const items = await readTickets();
-    const next = items.map((ticket) => ticket.id === id ? { ...ticket, status, updatedAt: Date.now() } : ticket);
-    await writeTickets(next);
-    const updated = next.find((ticket) => ticket.id === id) || null;
-    res.json({ ok: true, ticket: updated });
-  } catch (error) {
-    res.status(400).json({
-      error: error instanceof Error ? error.message : "Не удалось обновить тикет.",
+    const key = String(req.query?.key || "guest").trim() || "guest";
+    const state = await readUserState(key);
+    res.json({
+      key,
+      state,
+      tgUserId: null,
+      identity: null,
+      isAdmin: false,
     });
   }
 });
@@ -1826,7 +1363,17 @@ app.post("/api/profile-state", async (req, res) => {
   try {
     const key = String(req.body?.key || "").trim();
     if (!key) throw new Error("Передай key");
-    const state = await writeUserState(key, req.body);
+    const incoming = { ...req.body };
+    const telegram = normalizeTelegramIdentity({
+      tgUserId: req.body?.tgUserId,
+      username: req.body?.tgIdentity?.handle ? String(req.body.tgIdentity.handle).replace(/^@/, "") : req.body?.telegram?.username,
+      firstName: req.body?.tgIdentity?.name || req.body?.telegram?.firstName,
+      photoUrl: req.body?.tgIdentity?.avatar || req.body?.telegram?.photoUrl,
+    });
+    if (telegram) {
+      incoming.telegram = telegram;
+    }
+    const state = await writeUserState(key, incoming);
     res.json(state);
   } catch (error) {
     res.status(400).json({

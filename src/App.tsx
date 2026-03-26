@@ -11,6 +11,7 @@ import {
   ExternalLink,
   FolderOpen,
   Gift,
+  HelpCircle,
   Link2,
   Loader2,
   MessageCircle,
@@ -146,6 +147,14 @@ type UserIdentity = {
   name: string;
   handle?: string;
   avatar?: string | null;
+};
+
+type MeResponse = {
+  key: string;
+  state?: ProfileState;
+  identity?: UserIdentity;
+  tgUserId?: number | null;
+  isAdmin?: boolean;
 };
 
 const tabs: Array<{ id: TabId; label: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -435,13 +444,13 @@ function Section({ title, action, children, className = "" }: { title: string; a
 
 function UserPill({ identity }: { identity: UserIdentity }) {
   return (
-    <div className="flex w-[172px] shrink-0 items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
+    <div className="flex w-full max-w-full sm:max-w-[220px] sm:w-[220px] shrink-0 items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
       {identity.avatar ? (
         <img src={identity.avatar} alt={identity.name} className="h-10 w-10 rounded-full object-cover" />
       ) : (
         <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-sm font-semibold text-white">{initials(identity.name)}</div>
       )}
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-semibold text-white">{identity.name}</div>
         <div className="truncate text-xs text-neutral-400">{identity.handle || "LUDO profile"}</div>
       </div>
@@ -451,9 +460,9 @@ function UserPill({ identity }: { identity: UserIdentity }) {
 
 function MenuTile({ title, value, active, onClick, tone }: { title: string; value: string; active: boolean; onClick: () => void; tone: string }) {
   return (
-    <button onClick={onClick} className={`rounded-2xl border p-4 text-left transition ${active ? tone : "border-white/10 bg-black/20 hover:bg-white/10"}`}>
-      <div className="text-sm font-semibold text-white">{title}</div>
-      <div className="mt-1 text-xs text-neutral-400">{value}</div>
+    <button onClick={onClick} className={`min-w-0 w-full rounded-2xl border p-4 text-left transition ${active ? tone : "border-white/10 bg-black/20 hover:bg-white/10"}`}>
+      <div className="truncate text-sm font-semibold text-white">{title}</div>
+      <div className="mt-1 truncate text-xs text-neutral-400">{value}</div>
     </button>
   );
 }
@@ -467,6 +476,7 @@ export default function App() {
   const [userKey, setUserKey] = useState("guest");
   const [profileState, setProfileState] = useState<ProfileState>(() => defaultProfileState("guest"));
   const [profileStateLoaded, setProfileStateLoaded] = useState(false);
+  const [backendHydrated, setBackendHydrated] = useState(false);
   const [profileSection, setProfileSection] = useState<ProfileSectionId>("settings");
 
   const [activeTab, setActiveTab] = useState<TabId>("feed");
@@ -523,24 +533,54 @@ export default function App() {
   const isAdmin = Boolean(tgUserId && ADMIN_IDS.has(tgUserId));
 
   useEffect(() => {
-    window.Telegram?.WebApp?.ready?.();
-    window.Telegram?.WebApp?.expand?.();
-    const telegramUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
-    const nextUserKey = telegramUser?.id ? `tg-${telegramUser.id}` : createGuestKey();
-    setUserKey(nextUserKey);
-    setTgUserId(typeof telegramUser?.id === "number" ? telegramUser.id : null);
-    if (telegramUser) {
-      const fullName = [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(" ").trim();
-      setTgIdentity({
-        name: fullName || telegramUser.username || "Telegram user",
-        handle: telegramUser.username ? `@${telegramUser.username}` : "Telegram",
-        avatar: telegramUser.photo_url || null,
-      });
+    let cancelled = false;
+
+    async function bootstrap() {
+      window.Telegram?.WebApp?.ready?.();
+      window.Telegram?.WebApp?.expand?.();
+
+      const telegramUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+      const fallbackKey = createGuestKey();
+      const nextTgUserId = typeof telegramUser?.id === "number" ? telegramUser.id : null;
+      const fullName = [telegramUser?.first_name, telegramUser?.last_name].filter(Boolean).join(" ").trim();
+
+      if (nextTgUserId) {
+        setTgUserId(nextTgUserId);
+        setTgIdentity({
+          name: fullName || telegramUser?.username || "Telegram user",
+          handle: telegramUser?.username ? `@${telegramUser.username}` : "Telegram",
+          avatar: telegramUser?.photo_url || null,
+        });
+      }
+
+      if (!apiBase || !nextTgUserId) {
+        if (!cancelled) setUserKey(nextTgUserId ? `tg-${nextTgUserId}` : fallbackKey);
+        return;
+      }
+
+      try {
+        const meUrl = `${apiBase}/api/me?tgUserId=${encodeURIComponent(String(nextTgUserId))}&username=${encodeURIComponent(telegramUser?.username || "")}&firstName=${encodeURIComponent(telegramUser?.first_name || "")}&lastName=${encodeURIComponent(telegramUser?.last_name || "")}&photoUrl=${encodeURIComponent(telegramUser?.photo_url || "")}`;
+        const response = await fetch(meUrl);
+        const data = (await response.json().catch(() => null)) as MeResponse | null;
+        if (cancelled) return;
+        setUserKey(data?.key || `tg-${nextTgUserId}`);
+        if (data?.tgUserId) setTgUserId(data.tgUserId);
+        if (data?.identity) setTgIdentity(data.identity);
+      } catch {
+        if (!cancelled) setUserKey(`tg-${nextTgUserId}`);
+      }
     }
-  }, []);
+
+    bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase]);
 
   useEffect(() => {
+    if (!userKey) return;
     const local = loadLocalState(userKey);
+    setBackendHydrated(false);
     setProfileState(local);
     setProfileStateLoaded(true);
     setSteamInput(local.steam.input || "");
@@ -551,54 +591,68 @@ export default function App() {
   }, [userKey]);
 
   const loadBackendState = useCallback(async () => {
-    if (!apiBase || !userKey) return;
+    if (!userKey) return;
+    if (!apiBase) {
+      setBackendHydrated(true);
+      return;
+    }
     try {
-      const response = await fetch(`${apiBase}/api/profile-state?key=${encodeURIComponent(userKey)}`);
-      if (!response.ok) return;
+      const endpoint = tgUserId
+        ? `${apiBase}/api/me?tgUserId=${encodeURIComponent(String(tgUserId))}`
+        : `${apiBase}/api/profile-state?key=${encodeURIComponent(userKey)}`;
+      const response = await fetch(endpoint);
+      if (!response.ok) {
+        setBackendHydrated(true);
+        return;
+      }
       const data = await response.json();
+      const remoteState = data?.state || data;
       const merged: ProfileState = {
         ...defaultProfileState(userKey),
-        ...data,
+        ...remoteState,
         settings: {
           ...defaultProfileState(userKey).settings,
-          ...(data.settings || {}),
+          ...(remoteState?.settings || {}),
           quietHours: {
             ...defaultProfileState(userKey).settings.quietHours,
-            ...(data.settings?.quietHours || {}),
+            ...(remoteState?.settings?.quietHours || {}),
           },
         },
-        daily: { ...defaultProfileState(userKey).daily, ...(data.daily || {}) },
-        referral: { ...defaultProfileState(userKey).referral, ...(data.referral || {}) },
-        steam: { ...defaultProfileState(userKey).steam, ...(data.steam || {}) },
+        daily: { ...defaultProfileState(userKey).daily, ...(remoteState?.daily || {}) },
+        referral: { ...defaultProfileState(userKey).referral, ...(remoteState?.referral || {}) },
+        steam: { ...defaultProfileState(userKey).steam, ...(remoteState?.steam || {}) },
       };
       setProfileState(merged);
       if (merged.steam.input) setSteamInput(merged.steam.input);
-      if (merged.steam.steamid) {
-        setSteamConnected(true);
-        setSteamId(merged.steam.steamid);
-        setSteamName(merged.steam.personaname || "Steam player");
-        setSteamAvatar(merged.steam.avatarfull || null);
-      }
-    } catch {}
-  }, [apiBase, userKey]);
+      setSteamConnected(Boolean(merged.steam.steamid));
+      setSteamId(merged.steam.steamid || "");
+      setSteamName(merged.steam.personaname || "Steam player");
+      setSteamAvatar(merged.steam.avatarfull || null);
+      if (data?.identity && !tgIdentity) setTgIdentity(data.identity);
+    } catch {
+      // ignore, keep local copy
+    } finally {
+      setBackendHydrated(true);
+    }
+  }, [apiBase, userKey, tgUserId, tgIdentity]);
 
   useEffect(() => {
     loadBackendState();
   }, [loadBackendState]);
 
   useEffect(() => {
-    if (!profileStateLoaded) return;
+    if (!profileStateLoaded || !backendHydrated || !userKey) return;
     saveLocalState(userKey, profileState);
-    if (!apiBase || !userKey) return;
+    if (!apiBase) return;
     const timer = setTimeout(() => {
       fetch(`${apiBase}/api/profile-state`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...profileState, key: userKey }),
+        body: JSON.stringify({ ...profileState, key: userKey, tgUserId, tgIdentity }),
       }).catch(() => {});
     }, 350);
     return () => clearTimeout(timer);
-  }, [apiBase, profileState, profileStateLoaded, userKey]);
+  }, [apiBase, profileState, profileStateLoaded, backendHydrated, userKey, tgUserId, tgIdentity]);
 
   useEffect(() => {
     if (!apiBase || !userKey) return;
@@ -677,7 +731,9 @@ export default function App() {
       setSteamId(String(data?.steamid || ""));
       setSteamName(data?.personaname || data?.profile?.personaname || "Steam player");
       setSteamAvatar(data?.profile?.avatarfull || null);
-      setInventoryStatus(`Steam подключен. Позиций: ${items.length}. Оценка: ${money(Number(data?.totalValue || 0))}.`);
+      const marketableCount = Number(data?.marketableCount || items.filter((item) => item.marketable).length || 0);
+      const pricedCount = Number(data?.pricedCount || items.filter((item) => item.price > 0).length || 0);
+      setInventoryStatus(`Steam подключен. Позиций: ${items.length}. Оценено ${pricedCount} из ${marketableCount || items.length}. Сумма: ${money(Number(data?.totalValue || 0))}.`);
       setProfileState((current) => ({
         ...current,
         steam: {
@@ -699,11 +755,11 @@ export default function App() {
   }, [apiBase, steamInput, userKey]);
 
   useEffect(() => {
-    if (!apiBase || inventory.length > 0 || steamLoading) return;
+    if (!apiBase || !backendHydrated || inventory.length > 0 || steamLoading) return;
     const remembered = profileState.steam.input || steamInput;
     if (!remembered) return;
     connectSteam(false, remembered);
-  }, [apiBase, profileState.steam.input]);
+  }, [apiBase, backendHydrated, profileState.steam.input, steamInput, inventory.length, steamLoading, connectSteam]);
 
   const refreshInventory = useCallback(async () => {
     await connectSteam(true);
@@ -760,21 +816,23 @@ export default function App() {
   }, [apiBase, selectedItem?.descriptionText]);
 
   const inventorySignals = useMemo<FeedItem[]>(() => {
+    const watchSet = new Set(profileState.watchlist);
     return inventory
-      .filter((item) => item.price > 0)
-      .sort((a, b) => Math.abs(b.deltaPct) - Math.abs(a.deltaPct) || b.totalValue - a.totalValue)
-      .slice(0, 10)
+      .filter((item) => item.marketable && item.price > 0)
+      .filter((item) => watchSet.has(item.marketHashName) || Math.abs(item.deltaPct) >= 2.5)
+      .sort((a, b) => Number(watchSet.has(b.marketHashName)) - Number(watchSet.has(a.marketHashName)) || Math.abs(b.deltaPct) - Math.abs(a.deltaPct) || b.totalValue - a.totalValue)
+      .slice(0, 12)
       .map((item) => ({
         id: `market-${item.marketHashName}`,
         category: "Рынок",
         title: item.name,
-        body: `Текущая цена: ${money(item.price)}. В инвентаре: ${item.quantity} шт. Оценка позиции: ${money(item.totalValue)}. Изменение: ${deltaLabel(item.deltaPct)}.`,
+        body: `Рынок: ${money(item.price)} · ${deltaLabel(item.deltaPct)} · ${watchSet.has(item.marketHashName) ? "в watchlist" : "движение выше нормы"}`,
         createdAt: Math.floor(Date.now() / 1000),
         source: "LUDO Market",
         url: item.marketable ? `https://steamcommunity.com/market/listings/730/${encodeURIComponent(item.marketHashName)}` : null,
         imageUrl: item.iconUrl,
       }));
-  }, [inventory]);
+  }, [inventory, profileState.watchlist]);
 
   const feedItems = useMemo(() => {
     const combinedNews = dedupeFeedItems([...updatesFeed, ...esportsFeed, ...gamesFeed]);
@@ -1076,14 +1134,14 @@ export default function App() {
       }
     >
       <div className="sticky top-0 z-40 border-b border-white/10 bg-[#0B0817]/92 px-4 py-4 backdrop-blur-xl">
-        <div className="flex items-start justify-between gap-3">
-          <div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
             <div className="text-xs uppercase tracking-[0.22em] text-cyan-200/70">LUDO // CS2 Intel</div>
             <div className="mt-1 text-2xl font-bold text-white">{titleByTab}</div>
           </div>
           <UserPill identity={userIdentity} />
         </div>
-        <div className="mt-3 flex items-center justify-between gap-3">
+        <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-sm text-neutral-400">
             {activeTab === "feed" && (newsLoading ? "Обновляю ленту..." : newsStatus)}
             {activeTab === "inventory" && inventoryStatus}
@@ -1225,7 +1283,7 @@ export default function App() {
               </div>
             </Section>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Card className="rounded-[1.4rem] border border-cyan-400/20 bg-gradient-to-br from-cyan-500/10 to-cyan-400/5"><CardContent className="p-4"><div className="text-xs text-neutral-500">Оценка инвентаря</div><div className="mt-1 text-xl font-semibold text-white">{money(totalValue)}</div></CardContent></Card>
               <Card className="rounded-[1.4rem] border border-fuchsia-400/20 bg-gradient-to-br from-fuchsia-500/10 to-fuchsia-400/5"><CardContent className="p-4"><div className="text-xs text-neutral-500">Позиции</div><div className="mt-1 text-xl font-semibold text-white">{inventory.length}</div></CardContent></Card>
             </div>
@@ -1335,10 +1393,10 @@ export default function App() {
         {activeTab === "profile" && (
           <div className="space-y-4">
             <Section title="Профиль">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
                   <UserPill identity={userIdentity} />
-                  <div className="text-sm text-neutral-400">Steam: {steamConnected ? "подключён" : "не подключён"}<br />Ключ профиля: {userKey}</div>
+                  <div className="min-w-0 text-sm text-neutral-400">Steam: {steamConnected ? "подключён" : "не подключён"}<br />Ключ профиля: <span className="break-all">{userKey}</span></div>
                 </div>
               </div>
             </Section>
