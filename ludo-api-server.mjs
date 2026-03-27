@@ -26,6 +26,7 @@ const PRICE_HISTORY_MIN_INTERVAL_MS = 1000 * 60 * 60 * 12;
 const INVENTORY_TTL_MS = 1000 * 60 * 12;
 const NEWS_TTL_MS = 1000 * 60 * 20;
 const WEEK_MS = 1000 * 60 * 60 * 24 * 7;
+const PASS_SEASON_KEY = "LUDO_S1_BETA";
 
 app.use(cors({ origin: FRONTEND_ORIGIN }));
 app.use(express.json({ limit: "1mb" }));
@@ -168,6 +169,44 @@ async function translateTextToRu(text = "") {
   return translated.join(" ").replace(/\s{2,}/g, " ").trim();
 }
 
+function defaultPassState() {
+  return {
+    seasonKey: PASS_SEASON_KEY,
+    premium: false,
+    xp: 0,
+    claimedRewards: [],
+    dailyDate: todayStr(),
+    completedDailyKeys: [],
+    completedOnceKeys: [],
+  };
+}
+
+function mergePassState(pass = null) {
+  const base = defaultPassState();
+  const next = {
+    ...base,
+    ...(pass || {}),
+    claimedRewards: Array.isArray(pass?.claimedRewards) ? pass.claimedRewards.slice(0, 100) : base.claimedRewards,
+    completedDailyKeys: Array.isArray(pass?.completedDailyKeys) ? pass.completedDailyKeys.slice(0, 40) : base.completedDailyKeys,
+    completedOnceKeys: Array.isArray(pass?.completedOnceKeys) ? pass.completedOnceKeys.slice(0, 100) : base.completedOnceKeys,
+  };
+
+  if (next.seasonKey !== PASS_SEASON_KEY) {
+    return {
+      ...base,
+      premium: Boolean(pass?.premium),
+    };
+  }
+
+  if (next.dailyDate !== todayStr()) {
+    next.dailyDate = todayStr();
+    next.completedDailyKeys = [];
+  }
+
+  next.xp = Math.max(0, Number(next.xp || 0));
+  return next;
+}
+
 function defaultUserState(key) {
   return {
     key,
@@ -203,6 +242,7 @@ function defaultUserState(key) {
       personaname: "",
       avatarfull: null,
     },
+    pass: defaultPassState(),
     telegram: {
       id: null,
       username: "",
@@ -274,6 +314,7 @@ function mergeUserState(current, incoming) {
         ? incoming.steam.avatarfull
         : base.steam.avatarfull,
     },
+    pass: mergePassState(incoming?.pass || base.pass),
     telegram: {
       id: Number.isFinite(Number(incoming?.telegram?.id)) ? Number(incoming.telegram.id) : base.telegram.id,
       username: typeof incoming?.telegram?.username === "string" ? incoming.telegram.username : base.telegram.username,
@@ -656,11 +697,15 @@ async function getAdminSummary() {
   let referralClicks = 0;
   let referralVerified = 0;
   let watchlistItems = 0;
+  let steamConnected = 0;
+  let premiumPassUsers = 0;
   for (const filename of userFiles.filter((name) => name.endsWith('.json')).slice(0, 20000)) {
     const state = await readJson(path.join(USERS_DIR, filename), null);
     referralClicks += Number(state?.referral?.clicks || 0);
     referralVerified += Number(state?.referral?.verified || 0);
     watchlistItems += Array.isArray(state?.watchlist) ? state.watchlist.length : 0;
+    if (state?.steam?.steamid) steamConnected += 1;
+    if (Boolean(state?.pass?.premium)) premiumPassUsers += 1;
   }
 
   const openTickets = tickets.filter((ticket) => normalizeTicketStatus(ticket?.status) !== 'done').length;
@@ -673,6 +718,8 @@ async function getAdminSummary() {
     totalTickets: tickets.length,
     openTickets,
     watchlistItems,
+    steamConnected,
+    premiumPassUsers,
   };
 }
 
@@ -1050,7 +1097,6 @@ async function getPriceSnapshot(marketHashName) {
   const cachedPrice = Number(cached?.lastValue || 0);
   const cachedFresh = Boolean(cached?.updatedAt) && Date.now() - Number(cached.updatedAt || 0) < PRICE_TTL_MS;
 
-  // Нулевой кэш не считаем валидным: иначе инвентарь залипает на $0.00 на часы.
   if (cachedFresh && cachedPrice > 0) {
     return buildCachedResponse();
   }
@@ -1143,7 +1189,7 @@ async function getPriceSnapshot(marketHashName) {
     try {
       parsed = await fetchSearchFallbackPrice();
     } catch {
-      // fallback below
+      // ignore: fallback to cached/zero below
     }
   }
 
@@ -1656,6 +1702,37 @@ app.post("/api/tickets/:id/status", async (req, res) => {
   }
 });
 
+app.post("/api/activity/ping", async (req, res) => {
+  try {
+    const key = String(req.body?.key || "").trim() || "guest";
+    const tgUserId = Number.isFinite(Number(req.body?.tgUserId)) ? Number(req.body.tgUserId) : null;
+    const activeTab = String(req.body?.activeTab || "").trim() || null;
+    const steamConnected = Boolean(req.body?.steamConnected);
+    const watchlistSize = Number.isFinite(Number(req.body?.watchlistSize)) ? Number(req.body.watchlistSize) : null;
+
+    const activity = await recordUserActivity(key, tgUserId);
+    const state = await readUserState(key);
+    const next = {
+      ...state,
+      updatedAt: Date.now(),
+      meta: {
+        ...(state?.meta || {}),
+        lastActiveTab: activeTab,
+        steamConnected,
+        watchlistSize,
+        lastPingAt: Date.now(),
+      },
+    };
+    await writeUserState(key, next);
+
+    res.json({ ok: true, activity });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось записать активность.",
+    });
+  }
+});
+
 app.get("/api/admin/summary", async (req, res) => {
   try {
     const adminId = Number(req.query.adminId || 0);
@@ -1679,6 +1756,7 @@ app.get("/api/health", async (_req, res) => {
     frontendOrigin: FRONTEND_ORIGIN,
     hasSteamKey: Boolean(STEAM_WEB_API_KEY),
     dataDir: DATA_DIR,
+    passSeason: PASS_SEASON_KEY,
   });
 });
 

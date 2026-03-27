@@ -55,7 +55,7 @@ declare global {
 type TabId = "feed" | "inventory" | "radar" | "item" | "profile";
 type FeedFilter = "Все новости" | "Апдейты" | "Киберспорт" | "Рынок" | "Мир игр";
 type RangeId = "day" | "week" | "month" | "year";
-type ProfileSectionId = "settings" | "daily" | "referral" | "saved" | "steam" | "faq" | "admin" | "tickets";
+type ProfileSectionId = "settings" | "daily" | "referral" | "saved" | "steam" | "pass" | "faq" | "admin" | "tickets";
 type ItemKind = "Все" | "Скины" | "Кейсы" | "Наклейки" | "Капсулы" | "Ножи" | "Перчатки" | "Другое";
 
 type FeedItem = {
@@ -108,15 +108,30 @@ type InventoryItem = {
   descriptionText: string;
 };
 
-type AdminSummary = {
-  totalUsers: number;
-  activeToday: number;
-  active7d: number;
-  referralClicks: number;
-  referralVerified: number;
-  totalTickets: number;
-  openTickets: number;
-  watchlistItems: number;
+type PassState = {
+  seasonKey: string;
+  premium: boolean;
+  xp: number;
+  claimedRewards: string[];
+  dailyDate: string | null;
+  completedDailyKeys: string[];
+  completedOnceKeys: string[];
+};
+
+type PassReward = {
+  id: string;
+  level: number;
+  track: "free" | "premium";
+  title: string;
+  description: string;
+};
+
+type PassTask = {
+  key: string;
+  title: string;
+  xp: number;
+  kind: "daily" | "once";
+  premium?: boolean;
 };
 
 type ProfileState = {
@@ -152,6 +167,7 @@ type ProfileState = {
     personaname: string;
     avatarfull: string | null;
   };
+  pass: PassState;
 };
 
 type UserIdentity = {
@@ -180,6 +196,74 @@ const itemKinds: ItemKind[] = ["Все", "Скины", "Кейсы", "Накле
 const ADMIN_IDS = new Set([793655800, 1069618912]);
 const SUPPORT_LINK = "https://t.me/ludodropz";
 const COMMUNITY_LINK = "https://t.me/ludoinv_chat";
+
+const PASS_SEASON_KEY = "LUDO_S1_BETA";
+const PASS_XP_PER_LEVEL = 100;
+const PASS_MAX_LEVEL = 10;
+
+const PASS_FREE_REWARDS: PassReward[] = [
+  { id: "free-2", level: 2, track: "free", title: "🎟 1 билет в общий розыгрыш", description: "Первый шанс в сезонном общем розыгрыше." },
+  { id: "free-4", level: 4, track: "free", title: "🧪 +1 день PASS", description: "Тестовый день Premium-функций без покупки." },
+  { id: "free-6", level: 6, track: "free", title: "🎟 1 билет в общий розыгрыш", description: "Ещё один билет в общий сезонный пул." },
+  { id: "free-8", level: 8, track: "free", title: "🎁 Секретный бонус сезона", description: "Случайный сезонный бонус: XP, билет или мини-подарок." },
+  { id: "free-10", level: 10, track: "free", title: "🎟 2 билета в общий розыгрыш", description: "Финальный пуш в общий розыгрыш." },
+];
+
+const PASS_PREMIUM_REWARDS: PassReward[] = [
+  { id: "premium-1", level: 1, track: "premium", title: "🎁 Участие в PASS-розыгрыше", description: "Автоматический вход в отдельный Premium-розыгрыш." },
+  { id: "premium-2", level: 2, track: "premium", title: "🎟 +1 билет в PASS-розыгрыш", description: "Дополнительный билет именно в Premium-пул." },
+  { id: "premium-4", level: 4, track: "premium", title: "🎨 Первый дроп — скин начального уровня", description: "Небольшой, но реальный дроп для старта сезона." },
+  { id: "premium-5", level: 5, track: "premium", title: "🏷 Бейдж сезона", description: "Уникальный бейдж сезона в профиль." },
+  { id: "premium-6", level: 6, track: "premium", title: "🎟 +1 билет в PASS-розыгрыш", description: "Усиливает твои шансы перед серединой сезона." },
+  { id: "premium-7", level: 7, track: "premium", title: "🔥 Жирный дроп — скин среднего уровня", description: "Более заметный дроп, который уже чувствуется наградой." },
+  { id: "premium-8", level: 8, track: "premium", title: "🎁 Секретный сезонный бонус", description: "Скрытая награда сезона: бонусные билеты, XP или спец-перк." },
+  { id: "premium-9", level: 9, track: "premium", title: "🎟 +2 билета в PASS-розыгрыш", description: "Сильный буст прямо перед финалом дорожки." },
+  { id: "premium-10", level: 10, track: "premium", title: "👑 Финальный дроп — главный скин сезона", description: "Главный сезонный приз для тех, кто дошёл до конца." },
+];
+
+const PASS_TASKS: PassTask[] = [
+  { key: "daily_checkin", title: "Отметиться в ежедневке", xp: 20, kind: "daily" },
+  { key: "open_radar", title: "Открыть Радар дня", xp: 15, kind: "daily" },
+  { key: "review_inventory", title: "Проверить инвентарь", xp: 15, kind: "daily" },
+  { key: "read_news", title: "Открыть ленту", xp: 10, kind: "daily" },
+  { key: "connect_steam", title: "Подключить Steam", xp: 40, kind: "once" },
+  { key: "add_watchlist", title: "Добавить предмет в Radar", xp: 25, kind: "once" },
+];
+
+function defaultPassState(): PassState {
+  return {
+    seasonKey: PASS_SEASON_KEY,
+    premium: false,
+    xp: 0,
+    claimedRewards: [],
+    dailyDate: todayStr(),
+    completedDailyKeys: [],
+    completedOnceKeys: [],
+  };
+}
+
+function mergePassState(pass?: Partial<PassState> | null): PassState {
+  const base = defaultPassState();
+  const next: PassState = {
+    ...base,
+    ...(pass || {}),
+    claimedRewards: Array.isArray(pass?.claimedRewards) ? pass.claimedRewards : base.claimedRewards,
+    completedDailyKeys: Array.isArray(pass?.completedDailyKeys) ? pass.completedDailyKeys : base.completedDailyKeys,
+    completedOnceKeys: Array.isArray(pass?.completedOnceKeys) ? pass.completedOnceKeys : base.completedOnceKeys,
+  };
+  if (next.seasonKey !== PASS_SEASON_KEY) {
+    return {
+      ...base,
+      premium: Boolean(pass?.premium),
+    };
+  }
+  if (next.dailyDate !== todayStr()) {
+    next.dailyDate = todayStr();
+    next.completedDailyKeys = [];
+  }
+  next.xp = Math.max(0, Number(next.xp || 0));
+  return next;
+}
 
 const defaultProfileState = (key: string): ProfileState => ({
   key,
@@ -210,6 +294,7 @@ const defaultProfileState = (key: string): ProfileState => ({
     personaname: "",
     avatarfull: null,
   },
+  pass: defaultPassState(),
 });
 
 function money(value: number) {
@@ -354,6 +439,7 @@ function loadLocalState(key: string): ProfileState {
       daily: { ...defaultProfileState(key).daily, ...(parsed.daily || {}) },
       referral: { ...defaultProfileState(key).referral, ...(parsed.referral || {}) },
       steam: { ...defaultProfileState(key).steam, ...(parsed.steam || {}) },
+      pass: mergePassState(parsed.pass),
     };
   } catch {
     return defaultProfileState(key);
@@ -530,12 +616,6 @@ export default function App() {
   const [ticketContext, setTicketContext] = useState<{ title: string; url?: string | null; sourceType: string; sourceId?: string | null } | null>(null);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [ticketsLoading, setTicketsLoading] = useState(false);
-  const [watchlistMarketItems, setWatchlistMarketItems] = useState<InventoryItem[]>([]);
-  const [manualMarketQuery, setManualMarketQuery] = useState("");
-  const [manualMarketLoading, setManualMarketLoading] = useState(false);
-  const [manualMarketResults, setManualMarketResults] = useState<InventoryItem[]>([]);
-  const [adminSummary, setAdminSummary] = useState<AdminSummary | null>(null);
-  const [adminSummaryLoading, setAdminSummaryLoading] = useState(false);
 
 
   const userIdentity = useMemo<UserIdentity>(() => {
@@ -548,23 +628,6 @@ export default function App() {
   }, [tgIdentity, steamName, steamConnected, steamAvatar]);
 
   const isAdmin = Boolean(tgUserId && ADMIN_IDS.has(tgUserId));
-
-  const allTrackedItems = useMemo<InventoryItem[]>(() => {
-    const byHash = new Map<string, InventoryItem>();
-    for (const item of manualMarketResults) {
-      if (!item?.marketHashName) continue;
-      byHash.set(item.marketHashName, item);
-    }
-    for (const item of watchlistMarketItems) {
-      if (!item?.marketHashName) continue;
-      byHash.set(item.marketHashName, item);
-    }
-    for (const item of inventory) {
-      if (!item?.marketHashName) continue;
-      byHash.set(item.marketHashName, item);
-    }
-    return Array.from(byHash.values());
-  }, [inventory, manualMarketResults, watchlistMarketItems]);
 
   function getTelegramUser() {
     const tg = window.Telegram?.WebApp;
@@ -682,6 +745,7 @@ export default function App() {
         daily: { ...defaultProfileState(userKey).daily, ...(remoteState?.daily || {}) },
         referral: { ...defaultProfileState(userKey).referral, ...(remoteState?.referral || {}) },
         steam: { ...defaultProfileState(userKey).steam, ...(remoteState?.steam || {}) },
+        pass: mergePassState(remoteState?.pass),
       };
       setProfileState(merged);
       if (merged.steam.input) setSteamInput(merged.steam.input);
@@ -716,6 +780,24 @@ export default function App() {
   }, [apiBase, profileState, profileStateLoaded, backendHydrated, userKey, tgUserId, tgIdentity]);
 
   useEffect(() => {
+    if (!apiBase || !userKey || !backendHydrated) return;
+    const timer = setTimeout(() => {
+      fetch(`${apiBase}/api/activity/ping`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: userKey,
+          tgUserId,
+          activeTab,
+          steamConnected,
+          watchlistSize: profileState.watchlist.length,
+        }),
+      }).catch(() => {});
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [apiBase, userKey, tgUserId, backendHydrated, activeTab, steamConnected, profileState.watchlist.length]);
+
+  useEffect(() => {
     if (!apiBase || !userKey) return;
     const startParam = readStartParam();
     if (!startParam) return;
@@ -732,6 +814,52 @@ export default function App() {
       })
       .catch(() => {});
   }, [apiBase, userKey]);
+
+  const awardPassTask = useCallback((taskKey: string) => {
+    const task = PASS_TASKS.find((entry) => entry.key === taskKey);
+    if (!task) return;
+
+    setProfileState((current) => {
+      const pass = mergePassState(current.pass);
+      const isDaily = task.kind === "daily";
+      const dailyDate = todayStr();
+      const currentDaily = pass.dailyDate === dailyDate ? pass.completedDailyKeys : [];
+      const completed = isDaily ? currentDaily : pass.completedOnceKeys;
+
+      if (completed.includes(task.key)) return current;
+      if (task.premium && !pass.premium) return current;
+
+      const nextPass: PassState = {
+        ...pass,
+        dailyDate,
+        completedDailyKeys: isDaily ? [...currentDaily, task.key] : currentDaily,
+        completedOnceKeys: isDaily ? pass.completedOnceKeys : [...pass.completedOnceKeys, task.key],
+        xp: pass.xp + task.xp,
+      };
+
+      return { ...current, pass: nextPass };
+    });
+  }, []);
+
+  const claimPassReward = useCallback((rewardId: string) => {
+    setProfileState((current) => {
+      const pass = mergePassState(current.pass);
+      if (pass.claimedRewards.includes(rewardId)) return current;
+      return {
+        ...current,
+        pass: {
+          ...pass,
+          claimedRewards: [rewardId, ...pass.claimedRewards],
+        },
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "feed") awardPassTask("read_news");
+    if (activeTab === "inventory") awardPassTask("review_inventory");
+    if (activeTab === "radar") awardPassTask("open_radar");
+  }, [activeTab, awardPassTask]);
 
   const refreshNews = useCallback(async () => {
     if (!apiBase) return;
@@ -805,6 +933,7 @@ export default function App() {
         },
       }));
       setSteamInput(cleanInput);
+      awardPassTask("connect_steam");
       if (items.length) setSelectedItemHash(items[0].marketHashName);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось подключить Steam.";
@@ -813,7 +942,7 @@ export default function App() {
     } finally {
       setSteamLoading(false);
     }
-  }, [apiBase, steamInput, userKey]);
+  }, [apiBase, steamInput, userKey, awardPassTask]);
 
   useEffect(() => {
     if (!apiBase || !backendHydrated || inventory.length > 0 || steamLoading) return;
@@ -827,35 +956,9 @@ export default function App() {
   }, [connectSteam]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function run() {
-      if (!apiBase || !userKey || profileState.watchlist.length === 0) {
-        setWatchlistMarketItems([]);
-        return;
-      }
-      try {
-        const response = await fetch(`${apiBase}/api/watchlist/details?key=${encodeURIComponent(userKey)}`);
-        const data = await response.json().catch(() => null);
-        if (!response.ok) throw new Error(data?.error || `watchlist_${response.status}`);
-        if (!cancelled) {
-          setWatchlistMarketItems(Array.isArray(data?.items) ? data.items : []);
-        }
-      } catch {
-        if (!cancelled) setWatchlistMarketItems([]);
-      }
-    }
-
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [apiBase, userKey, profileState.watchlist]);
-
-  useEffect(() => {
     if (!selectedItemHash || !apiBase) return;
     let cancelled = false;
-    const selected = allTrackedItems.find((item) => item.marketHashName === selectedItemHash);
+    const selected = inventory.find((item) => item.marketHashName === selectedItemHash);
     if (!selected) return;
     async function run() {
       setHistoryLoading(true);
@@ -873,9 +976,9 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [apiBase, allTrackedItems, selectedItemHash]);
+  }, [apiBase, inventory, selectedItemHash]);
 
-  const selectedItem = useMemo(() => allTrackedItems.find((item) => item.marketHashName === selectedItemHash) || inventory[0] || watchlistMarketItems[0] || null, [allTrackedItems, inventory, watchlistMarketItems, selectedItemHash]);
+  const selectedItem = useMemo(() => inventory.find((item) => item.marketHashName === selectedItemHash) || inventory[0] || null, [inventory, selectedItemHash]);
 
   useEffect(() => {
     let cancelled = false;
@@ -904,7 +1007,7 @@ export default function App() {
 
   const inventorySignals = useMemo<FeedItem[]>(() => {
     const watchSet = new Set(profileState.watchlist);
-    return allTrackedItems
+    return inventory
       .filter((item) => item.marketable && item.price > 0)
       .filter((item) => watchSet.has(item.marketHashName) || Math.abs(item.deltaPct) >= 2.5)
       .sort((a, b) => Number(watchSet.has(b.marketHashName)) - Number(watchSet.has(a.marketHashName)) || Math.abs(b.deltaPct) - Math.abs(a.deltaPct) || b.totalValue - a.totalValue)
@@ -919,7 +1022,7 @@ export default function App() {
         url: item.marketable ? `https://steamcommunity.com/market/listings/730/${encodeURIComponent(item.marketHashName)}` : null,
         imageUrl: item.iconUrl,
       }));
-  }, [allTrackedItems, profileState.watchlist]);
+  }, [inventory, profileState.watchlist]);
 
   const feedItems = useMemo(() => {
     const combinedNews = dedupeFeedItems([...updatesFeed, ...esportsFeed, ...gamesFeed]);
@@ -940,11 +1043,133 @@ export default function App() {
 
   const alerts = useMemo(() => {
     const q = watchlistSearch.trim().toLowerCase();
-    return allTrackedItems
+    return inventory
       .filter((item) => profileState.watchlist.includes(item.marketHashName) || Math.abs(item.deltaPct) >= 0.5)
       .filter((item) => watchlistKindFilter === "Все" || classifyItemKind(item) === watchlistKindFilter)
       .filter((item) => !q || item.name.toLowerCase().includes(q) || item.marketHashName.toLowerCase().includes(q));
-  }, [allTrackedItems, profileState.watchlist, watchlistSearch, watchlistKindFilter]);
+  }, [inventory, profileState.watchlist, watchlistSearch, watchlistKindFilter]);
+
+  const passState = useMemo(() => mergePassState(profileState.pass), [profileState.pass]);
+  const passLevel = useMemo(() => Math.min(PASS_MAX_LEVEL, Math.floor(passState.xp / PASS_XP_PER_LEVEL) + 1), [passState.xp]);
+  const passProgressPct = useMemo(() => {
+    if (passLevel >= PASS_MAX_LEVEL) return 100;
+    const currentFloor = (passLevel - 1) * PASS_XP_PER_LEVEL;
+    return Math.min(100, Math.max(0, ((passState.xp - currentFloor) / PASS_XP_PER_LEVEL) * 100));
+  }, [passLevel, passState.xp]);
+
+  const topValueItems = useMemo(() => [...inventory].sort((a, b) => b.totalValue - a.totalValue), [inventory]);
+  const topMomentumItems = useMemo(() => [...inventory].filter((item) => item.price > 0).sort((a, b) => Math.abs(b.deltaPct) - Math.abs(a.deltaPct) || b.totalValue - a.totalValue), [inventory]);
+  const watchSet = useMemo(() => new Set(profileState.watchlist), [profileState.watchlist]);
+  const watchedItems = useMemo(() => inventory.filter((item) => watchSet.has(item.marketHashName)), [inventory, watchSet]);
+
+  const radarSignals = useMemo(() => {
+    return inventory
+      .filter((item) => item.price > 0)
+      .map((item) => {
+        const watched = watchSet.has(item.marketHashName);
+        const absDelta = Math.abs(item.deltaPct);
+        const valueShare = totalValue > 0 ? item.totalValue / totalValue : 0;
+        let score = 0;
+        let badge = "👀 тихо";
+        let reason = "Предмет пока просто в поле зрения.";
+        if (watched) score += 3;
+        if (absDelta >= 5) {
+          score += 4;
+          badge = item.deltaPct >= 0 ? "🚀 разгон" : "⚠️ просадка";
+          reason = item.deltaPct >= 0 ? "Резкий рост цены за последние точки истории." : "Резкая просадка — возможно, стоит перепроверить позицию.";
+        } else if (absDelta >= 2.5) {
+          score += 3;
+          badge = "🔥 движение";
+          reason = "Цена двигается сильнее обычного — это уже не фон.";
+        } else if (watched) {
+          score += 1;
+          badge = "🎯 твой радар";
+          reason = "Предмет в твоём радаре, поэтому держим его рядом.";
+        }
+        if (valueShare >= 0.12) {
+          score += 2;
+          reason = "Это заметная доля твоего инвентаря, за ней точно стоит следить.";
+        }
+        return { ...item, watched, score, badge, reason };
+      })
+      .filter((item) => item.score >= 2)
+      .sort((a, b) => b.score - a.score || Math.abs(b.deltaPct) - Math.abs(a.deltaPct) || b.totalValue - a.totalValue)
+      .slice(0, 6);
+  }, [inventory, totalValue, watchSet]);
+
+  const dashboardRecommendations = useMemo(() => {
+    const cards: Array<{ id: string; title: string; body: string; cta: string; action: "connect" | "daily" | "radar" | "item" | "inventory"; itemHash?: string }> = [];
+
+    if (!steamConnected) {
+      cards.push({
+        id: "connect-steam",
+        title: "Подключи Steam и получи реальную картину",
+        body: "Как только подключишь профиль, LUDO покажет сумму инвентаря, движение по предметам и персональный радар.",
+        cta: "Подключить Steam",
+        action: "connect",
+      });
+    }
+
+    if (steamConnected && profileState.daily.lastCheckinDate !== todayStr()) {
+      cards.push({
+        id: "daily-checkin",
+        title: "Забери ежедневку и XP сезона",
+        body: "Сейчас у тебя есть бесплатная отметка дня — это и удержание стрика, и прогресс в LUDO PASS.",
+        cta: "Отметиться",
+        action: "daily",
+      });
+    }
+
+    const hottestUntracked = topMomentumItems.find((item) => !watchSet.has(item.marketHashName));
+    if (hottestUntracked) {
+      cards.push({
+        id: `radar-${hottestUntracked.marketHashName}`,
+        title: "LUDO нашёл предмет для радара",
+        body: `${hottestUntracked.name} сейчас двигается на ${deltaLabel(hottestUntracked.deltaPct)}. Его стоит поставить на слежение, пока он живой.`,
+        cta: "Добавить в Radar",
+        action: "radar",
+        itemHash: hottestUntracked.marketHashName,
+      });
+    }
+
+    const topValued = topValueItems[0];
+    if (topValued) {
+      cards.push({
+        id: `item-${topValued.marketHashName}`,
+        title: "Вот твоя главная позиция прямо сейчас",
+        body: `${topValued.name} — самая тяжёлая позиция в инвентаре на ${money(topValued.totalValue)}.`,
+        cta: "Открыть предмет",
+        action: "item",
+        itemHash: topValued.marketHashName,
+      });
+    }
+
+    if (cards.length === 0) {
+      cards.push({
+        id: "inventory-empty",
+        title: "Собери первую полезную картину",
+        body: "Подключи инвентарь и добавь хотя бы один предмет в радар — тогда приложение начнёт работать как ассистент, а не как пустая оболочка.",
+        cta: "Открыть инвентарь",
+        action: "inventory",
+      });
+    }
+
+    return cards.slice(0, 3);
+  }, [steamConnected, profileState.daily.lastCheckinDate, topMomentumItems, watchSet, topValueItems]);
+
+  const passTaskCards = useMemo(() => {
+    return PASS_TASKS.map((task) => {
+      const done = task.kind === "daily"
+        ? (passState.dailyDate === todayStr() ? passState.completedDailyKeys : []).includes(task.key)
+        : passState.completedOnceKeys.includes(task.key);
+      return { ...task, done, locked: Boolean(task.premium && !passState.premium) };
+    });
+  }, [passState]);
+
+  const nextPassReward = useMemo(() => {
+    const rewards = [...PASS_FREE_REWARDS, ...PASS_PREMIUM_REWARDS];
+    return rewards.find((reward) => reward.level >= passLevel && !passState.claimedRewards.includes(reward.id)) || rewards[rewards.length - 1];
+  }, [passLevel, passState.claimedRewards]);
 
   const rangeHistory = useMemo(() => filterHistory(selectedHistory, historyRange), [selectedHistory, historyRange]);
   const historyPolyline = useMemo(() => buildSvgPolyline(rangeHistory), [rangeHistory]);
@@ -1003,13 +1228,19 @@ export default function App() {
   }, []);
 
   const toggleWatchlist = useCallback((marketHashName: string) => {
-    setProfileState((current) => ({
-      ...current,
-      watchlist: current.watchlist.includes(marketHashName)
-        ? current.watchlist.filter((item) => item !== marketHashName)
-        : [marketHashName, ...current.watchlist],
-    }));
-  }, []);
+    let added = false;
+    setProfileState((current) => {
+      const exists = current.watchlist.includes(marketHashName);
+      added = !exists;
+      return {
+        ...current,
+        watchlist: exists
+          ? current.watchlist.filter((item) => item !== marketHashName)
+          : [marketHashName, ...current.watchlist],
+      };
+    });
+    if (added) awardPassTask("add_watchlist");
+  }, [awardPassTask]);
 
   const toggleNotifications = useCallback(() => {
     setProfileState((current) => ({ ...current, settings: { ...current.settings, notifications: !current.settings.notifications } }));
@@ -1050,6 +1281,7 @@ export default function App() {
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error || "daily_checkin");
       setProfileState((current) => ({ ...current, daily: { ...current.daily, ...(data.daily || {}) } }));
+      awardPassTask("daily_checkin");
       setDailyMessage(data?.message || "Отметка засчитана.");
     } catch (error) {
       setDailyMessage(error instanceof Error ? error.message : "Не удалось отметить ежедневку.");
@@ -1083,50 +1315,11 @@ export default function App() {
     }
   }, [apiBase, isAdmin, tgUserId]);
 
-  const fetchAdminSummary = useCallback(async () => {
-    if (!apiBase || !isAdmin || !tgUserId) return;
-    try {
-      setAdminSummaryLoading(true);
-      const response = await fetch(`${apiBase}/api/admin/summary?adminId=${tgUserId}`);
-      const data = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(data?.error || "admin_summary");
-      setAdminSummary(data?.summary || null);
-    } catch {
-      setAdminSummary(null);
-    } finally {
-      setAdminSummaryLoading(false);
-    }
-  }, [apiBase, isAdmin, tgUserId]);
-
-  const searchMarketItems = useCallback(async () => {
-    if (!apiBase) return;
-    const query = manualMarketQuery.trim();
-    if (!query) {
-      setManualMarketResults([]);
-      return;
-    }
-    try {
-      setManualMarketLoading(true);
-      const response = await fetch(`${apiBase}/api/market/search?q=${encodeURIComponent(query)}&limit=6`);
-      const data = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(data?.error || "market_search");
-      setManualMarketResults(Array.isArray(data?.items) ? data.items : []);
-    } catch {
-      setManualMarketResults([]);
-    } finally {
-      setManualMarketLoading(false);
-    }
-  }, [apiBase, manualMarketQuery]);
-
   useEffect(() => {
     if (profileSection === "tickets" && isAdmin) {
       fetchTickets();
     }
-    if (profileSection === "admin" && isAdmin) {
-      fetchAdminSummary();
-      fetchTickets();
-    }
-  }, [profileSection, isAdmin, fetchTickets, fetchAdminSummary]);
+  }, [profileSection, isAdmin, fetchTickets]);
 
   const openTicketDialog = useCallback((context?: { title?: string; url?: string | null; sourceType?: string; sourceId?: string | null }) => {
     setTicketContext({
@@ -1224,9 +1417,9 @@ export default function App() {
   }, []);
 
   const titleByTab = {
-    feed: "Новости и сигналы",
+    feed: "Мой рынок сегодня",
     inventory: "Инвентарь",
-    radar: "Watchlist и алерты",
+    radar: "Радар LUDO",
     item: "Карточка предмета",
     profile: "Профиль",
   }[activeTab];
@@ -1269,9 +1462,9 @@ export default function App() {
         </div>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-sm text-neutral-400">
-            {activeTab === "feed" && (newsLoading ? "Обновляю ленту..." : newsStatus)}
+            {activeTab === "feed" && (newsLoading ? "Обновляю ленту..." : (inventory.length ? "LUDO уже собрал для тебя сигналы, новости и сезонный прогресс." : newsStatus))}
             {activeTab === "inventory" && inventoryStatus}
-            {activeTab === "radar" && "Следи за тем, что реально важно: свой watchlist и заметные движения."}
+            {activeTab === "radar" && "LUDO сам подсвечивает, где у тебя движение, риск и смысл зайти завтра."}
             {activeTab === "item" && (selectedItem ? selectedItem.name : "Сначала выбери предмет из инвентаря.")}
           </div>
           {activeTab === "feed" ? (
@@ -1307,6 +1500,75 @@ export default function App() {
         >
         {activeTab === "feed" && (
           <div className="space-y-4">
+            <Section title="LUDO // Сегодня" className="border-cyan-400/20 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.18),transparent_42%),radial-gradient(circle_at_top_right,rgba(217,70,239,0.16),transparent_38%),linear-gradient(135deg,rgba(12,14,28,0.96),rgba(10,16,30,0.92))]">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                  <div className="text-xs uppercase tracking-[0.18em] text-cyan-200/70">Инвентарь</div>
+                  <div className="mt-2 text-2xl font-semibold text-white">{money(totalValue)}</div>
+                  <div className="mt-1 text-xs text-neutral-400">{inventory.length || 0} позиций · {watchedItems.length} в Radar</div>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                  <div className="text-xs uppercase tracking-[0.18em] text-fuchsia-200/70">LUDO PASS</div>
+                  <div className="mt-2 text-2xl font-semibold text-white">LVL {passLevel}</div>
+                  <div className="mt-1 text-xs text-neutral-400">{passState.xp} XP · {passState.premium ? "Premium открыт" : "Free-дорожка"}</div>
+                </div>
+                <div className="col-span-2 rounded-2xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-white">Следующая награда</div>
+                      <div className="mt-1 text-xs text-neutral-400">Уровень {nextPassReward?.level} · {nextPassReward?.track === "premium" ? "Premium" : "Free"}</div>
+                    </div>
+                    <Badge className={`rounded-full border-0 ${nextPassReward?.track === "premium" ? "bg-fuchsia-500/20 text-fuchsia-100" : "bg-cyan-500/20 text-cyan-100"}`}>{nextPassReward?.track === "premium" ? "💎 Premium" : "🆓 Free"}</Badge>
+                  </div>
+                  <div className="mt-3 text-sm text-white">{nextPassReward?.title}</div>
+                  <div className="mt-1 text-xs leading-5 text-neutral-400">{nextPassReward?.description}</div>
+                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
+                    <div className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-sky-400 to-fuchsia-400" style={{ width: `${passProgressPct}%` }} />
+                  </div>
+                </div>
+              </div>
+            </Section>
+
+            <Section title="LUDO говорит" className="border-fuchsia-400/20 bg-gradient-to-br from-fuchsia-500/10 to-cyan-500/10">
+              <div className="space-y-3">
+                {dashboardRecommendations.map((card) => (
+                  <div key={card.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <div className="text-sm font-semibold text-white">{card.title}</div>
+                    <div className="mt-2 text-sm leading-6 text-neutral-300">{card.body}</div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {card.action === "connect" ? <Button onClick={() => goTab("inventory")} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">{card.cta}</Button> : null}
+                      {card.action === "daily" ? <Button onClick={doDailyCheckin} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">{card.cta}</Button> : null}
+                      {card.action === "inventory" ? <Button onClick={() => goTab("inventory")} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">{card.cta}</Button> : null}
+                      {card.action === "radar" && card.itemHash ? <Button onClick={() => toggleWatchlist(card.itemHash)} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">{card.cta}</Button> : null}
+                      {card.action === "item" && card.itemHash ? <Button onClick={() => {
+                        const found = inventory.find((item) => item.marketHashName === card.itemHash);
+                        if (found) openItem(found);
+                      }} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">{card.cta}</Button> : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Section>
+
+            {radarSignals.length > 0 ? (
+              <Section title="Сигналы LUDO">
+                <div className="space-y-3">
+                  {radarSignals.slice(0, 3).map((signal) => (
+                    <button key={signal.marketHashName} onClick={() => openItem(signal)} className="flex w-full items-start gap-3 rounded-2xl border border-white/10 bg-black/20 p-4 text-left transition hover:bg-white/10">
+                      {signal.iconUrl ? <img src={signal.iconUrl} alt={signal.name} className="h-16 w-16 rounded-2xl object-cover" /> : <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/10 text-xs text-neutral-400">item</div>}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="truncate text-sm font-semibold text-white">{signal.name}</div>
+                          <Badge className="rounded-full border-0 bg-white/10 text-white">{signal.badge}</Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-neutral-400">{money(signal.price)} · {deltaLabel(signal.deltaPct)} · {classifyItemKind(signal)}</div>
+                        <div className="mt-2 text-sm leading-5 text-neutral-300">{signal.reason}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </Section>
+            ) : null}
             {!savedOnly && inventorySignals.length > 0 ? (
               <Section title="Мой инвентарь" className="border-cyan-400/20 bg-gradient-to-br from-cyan-500/10 to-fuchsia-500/10">
                 <div className="space-y-3">
@@ -1447,29 +1709,30 @@ export default function App() {
 
         {activeTab === "radar" && (
           <div className="space-y-4">
-            <Section title="Watchlist" className="border-fuchsia-400/20 bg-gradient-to-br from-fuchsia-500/10 to-cyan-500/10">
-              <div className="mb-4 rounded-2xl border border-white/10 bg-black/20 p-3">
-                <div className="mb-3 text-sm text-neutral-400">Добавь предмет из Steam Market, даже если его нет в твоём инвентаре.</div>
-                <div className="flex gap-2">
-                  <Input value={manualMarketQuery} onChange={(event) => setManualMarketQuery(event.target.value)} placeholder="Например: Chroma 2 Case" className="rounded-2xl border-white/10 bg-white/5 text-white placeholder:text-neutral-500" />
-                  <Button onClick={searchMarketItems} disabled={manualMarketLoading} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">
-                    {manualMarketLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                  </Button>
+            <Section title="Сигналы дня" className="border-cyan-400/20 bg-gradient-to-br from-cyan-500/10 to-white/5">
+              {radarSignals.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-neutral-400">Когда LUDO увидит движение в твоих предметах, оно появится здесь первым.</div> : (
+                <div className="space-y-3">
+                  {radarSignals.map((item) => (
+                    <div key={`signal-${item.marketHashName}`} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-semibold text-white">{item.name}</div>
+                          <div className="mt-1 text-sm text-neutral-400">{money(item.price)} · {deltaLabel(item.deltaPct)} · {classifyItemKind(item)}</div>
+                        </div>
+                        <Badge className="rounded-full border-0 bg-white/10 text-white">{item.badge}</Badge>
+                      </div>
+                      <div className="mt-3 text-sm leading-6 text-neutral-300">{item.reason}</div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button onClick={() => openItem(item)} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">Открыть предмет</Button>
+                        <Button onClick={() => toggleWatchlist(item.marketHashName)} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">{watchSet.has(item.marketHashName) ? "Убрать из Radar" : "Добавить в Radar"}</Button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                {manualMarketResults.length > 0 ? <div className="mt-3 space-y-2">{manualMarketResults.map((item) => (
-                  <div key={item.marketHashName} className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 p-3">
-                    {item.iconUrl ? <img src={item.iconUrl} alt={item.name} className="h-12 w-12 rounded-xl object-cover" /> : <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/10 text-xs text-neutral-400">item</div>}
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium text-white">{item.name}</div>
-                      <div className="mt-1 truncate text-xs text-neutral-400">{money(item.price)} · {deltaLabel(item.deltaPct)} · {classifyItemKind(item)}</div>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button onClick={() => openItem(item)} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Открыть</Button>
-                      <Button onClick={() => toggleWatchlist(item.marketHashName)} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">{profileState.watchlist.includes(item.marketHashName) ? "Убрать" : "+ Watch"}</Button>
-                    </div>
-                  </div>
-                ))}</div> : null}
-              </div>
+              )}
+            </Section>
+
+            <Section title="Watchlist" className="border-fuchsia-400/20 bg-gradient-to-br from-fuchsia-500/10 to-cyan-500/10">
               <div className="mb-3 flex items-center gap-2 rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
                 <Search className="h-4 w-4 text-neutral-500" />
                 <input value={watchlistSearch} onChange={(event) => setWatchlistSearch(event.target.value)} placeholder="Найти предмет в watchlist" className="w-full bg-transparent text-sm text-white outline-none placeholder:text-neutral-500" />
@@ -1552,6 +1815,7 @@ export default function App() {
             <div className="grid grid-cols-2 gap-3">
               <MenuTile title="Настройки" value={profileState.settings.notifications ? "уведомления вкл" : "уведомления выкл"} active={profileSection === "settings"} onClick={() => setProfileSection("settings")} tone="border-cyan-300/30 bg-cyan-400/10" />
               <MenuTile title="Ежедневка" value={`стрик ${profileState.daily.streak}/7`} active={profileSection === "daily"} onClick={() => setProfileSection("daily")} tone="border-amber-300/30 bg-amber-400/10" />
+              <MenuTile title="LUDO PASS" value={`lvl ${passLevel} · ${passState.premium ? "premium" : "free"}`} active={profileSection === "pass"} onClick={() => setProfileSection("pass")} tone="border-violet-300/30 bg-violet-400/10" />
               <MenuTile title="Рефералка" value={`${profileState.referral.verified} подтвержд.`} active={profileSection === "referral"} onClick={() => setProfileSection("referral")} tone="border-fuchsia-300/30 bg-fuchsia-400/10" />
               <MenuTile title="FAQ" value="вопросы и помощь" active={profileSection === "faq"} onClick={() => setProfileSection("faq")} tone="border-emerald-300/30 bg-emerald-400/10" />
               <MenuTile title="Сохранённое" value={`${profileState.savedNewsIds.length} материалов`} active={profileSection === "saved"} onClick={() => setProfileSection("saved")} tone="border-violet-300/30 bg-violet-400/10" />
@@ -1631,7 +1895,83 @@ export default function App() {
               <Section title="Steam">
                 <div className="space-y-3">
                   <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-neutral-300">{steamConnected ? <>Подключён профиль <span className="font-semibold text-white">{steamName}</span><br />SteamID: <span className="font-semibold text-white">{steamId || "—"}</span></> : "Steam ещё не подключён."}</div>
-                  <Button onClick={refreshInventory} className="w-full rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15"><RefreshCw className="mr-2 h-4 w-4" />Обновить профиль Steam</Button>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                    <div className="mb-2 text-xs uppercase tracking-[0.18em] text-cyan-200/70">Подключение Steam</div>
+                    <Input value={steamInput} onChange={(event) => setSteamInput(event.target.value)} placeholder="https://steamcommunity.com/id/..." className="rounded-2xl border-white/10 bg-white/5 text-white placeholder:text-neutral-500" />
+                    {steamError ? <div className="mt-2 text-xs text-rose-200">{steamError}</div> : null}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button onClick={() => connectSteam(false)} disabled={steamLoading} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">{steamLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}Подключить / обновить</Button>
+                      <Button onClick={refreshInventory} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15"><RefreshCw className="mr-2 h-4 w-4" />Пересчитать</Button>
+                    </div>
+                  </div>
+                </div>
+              </Section>
+            )}
+
+            {profileSection === "pass" && (
+              <Section title="LUDO PASS">
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-white">Сезон Beta</div>
+                        <div className="mt-1 text-xs text-neutral-400">XP: {passState.xp} · Уровень {passLevel} из {PASS_MAX_LEVEL}</div>
+                      </div>
+                      <Badge className={`rounded-full border-0 ${passState.premium ? "bg-fuchsia-500/20 text-fuchsia-100" : "bg-white/10 text-white"}`}>{passState.premium ? "💎 Premium" : "🆓 Free"}</Badge>
+                    </div>
+                    <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
+                      <div className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-sky-400 to-fuchsia-400" style={{ width: `${passProgressPct}%` }} />
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {!passState.premium ? <Button onClick={() => setProfileState((current) => ({ ...current, pass: { ...mergePassState(current.pass), premium: true } }))} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">Открыть beta Premium</Button> : null}
+                      <Button onClick={() => setActiveTab("feed")} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Вернуться к сигналам</Button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3">
+                    {passTaskCards.map((task) => (
+                      <div key={task.key} className={`rounded-2xl border p-4 ${task.done ? "border-emerald-400/20 bg-emerald-500/10" : task.locked ? "border-white/10 bg-black/20 opacity-60" : "border-white/10 bg-black/20"}`}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-white">{task.title}</div>
+                            <div className="mt-1 text-xs text-neutral-400">{task.kind === "daily" ? "Ежедневное задание" : "Разовое задание"} · +{task.xp} XP</div>
+                          </div>
+                          <Badge className={`rounded-full border-0 ${task.done ? "bg-emerald-500/20 text-emerald-100" : task.locked ? "bg-white/10 text-white" : "bg-cyan-500/20 text-cyan-100"}`}>{task.done ? "✅" : task.locked ? "🔒" : "в пути"}</Badge>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3">
+                    {[{ title: "🆓 Free-дорожка", items: PASS_FREE_REWARDS }, { title: "💎 Premium-дорожка", items: PASS_PREMIUM_REWARDS }].map((block) => (
+                      <div key={block.title} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                        <div className="text-sm font-semibold text-white">{block.title}</div>
+                        <div className="mt-3 space-y-3">
+                          {block.items.map((reward) => {
+                            const unlocked = passLevel >= reward.level;
+                            const claimed = passState.claimedRewards.includes(reward.id);
+                            const lockedByTrack = reward.track === "premium" && !passState.premium;
+                            return (
+                              <div key={reward.id} className={`rounded-2xl border p-3 ${unlocked && !lockedByTrack ? "border-cyan-300/20 bg-white/5" : "border-white/10 bg-black/20"}`}>
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <div className="text-sm font-semibold text-white">Ур. {reward.level} — {reward.title}</div>
+                                    <div className="mt-1 text-xs leading-5 text-neutral-400">{reward.description}</div>
+                                  </div>
+                                  <Badge className={`rounded-full border-0 ${claimed ? "bg-emerald-500/20 text-emerald-100" : unlocked && !lockedByTrack ? "bg-cyan-500/20 text-cyan-100" : "bg-white/10 text-white"}`}>{claimed ? "забрано" : unlocked && !lockedByTrack ? "открыто" : lockedByTrack ? "premium" : "закрыто"}</Badge>
+                                </div>
+                                {unlocked && !lockedByTrack && !claimed ? (
+                                  <div className="mt-3">
+                                    <Button onClick={() => claimPassReward(reward.id)} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">Отметить как полученное</Button>
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </Section>
             )}
@@ -1653,20 +1993,14 @@ export default function App() {
 
             {profileSection === "admin" && isAdmin && (
               <Section title="Админка">
-                <div className="mb-3 text-sm text-neutral-400">{adminSummaryLoading ? "Обновляю сводку по приложению..." : "Живая сводка по пользователям, трафику и тикетам."}</div>
-                <div className="grid grid-cols-2 gap-3 text-sm text-neutral-300 sm:grid-cols-4">
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Юзеры</div><div className="mt-1 font-semibold text-white">{adminSummary?.totalUsers ?? "—"}</div></div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Активны сегодня</div><div className="mt-1 font-semibold text-white">{adminSummary?.activeToday ?? "—"}</div></div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Активны 7 дн.</div><div className="mt-1 font-semibold text-white">{adminSummary?.active7d ?? "—"}</div></div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Открытые тикеты</div><div className="mt-1 font-semibold text-white">{adminSummary?.openTickets ?? tickets.filter((ticket) => ticket.status !== "done").length}</div></div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Реф. клики</div><div className="mt-1 font-semibold text-white">{adminSummary?.referralClicks ?? "—"}</div></div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Реф. входы</div><div className="mt-1 font-semibold text-white">{adminSummary?.referralVerified ?? "—"}</div></div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Watchlist</div><div className="mt-1 font-semibold text-white">{adminSummary?.watchlistItems ?? profileState.watchlist.length}</div></div>
+                <div className="grid grid-cols-3 gap-3 text-sm text-neutral-300">
                   <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Постов</div><div className="mt-1 font-semibold text-white">{updatesFeed.length + esportsFeed.length + gamesFeed.length}</div></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Watchlist</div><div className="mt-1 font-semibold text-white">{profileState.watchlist.length}</div></div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Тикеты</div><div className="mt-1 font-semibold text-white">{tickets.filter((ticket) => ticket.status !== "done").length}</div></div>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button onClick={() => setProfileSection("tickets")} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">Открыть тикеты</Button>
-                  <Button onClick={() => { fetchAdminSummary(); fetchTickets(); }} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Обновить сводку</Button>
+                  <Button onClick={() => fetchTickets()} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Обновить тикеты</Button>
                   <Button onClick={() => window.open(SUPPORT_LINK, "_blank", "noopener,noreferrer")} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Связь</Button>
                 </div>
               </Section>
