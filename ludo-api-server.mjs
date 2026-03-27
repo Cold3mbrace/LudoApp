@@ -1091,12 +1091,36 @@ function normalizeMarketSearchText(value = "") {
 function marketSearchVariants(marketHashName) {
   const raw = String(marketHashName || "").trim();
   const variants = new Set([raw]);
+
+  const add = (value) => {
+    const next = String(value || "").replace(/\s+/g, " ").trim();
+    if (next) variants.add(next);
+  };
+
   const noStar = raw.replace(/^★\s*/u, "").trim();
   const noMarks = raw.replace(/[™®©]/g, "").trim();
   const noStarNoMarks = noStar.replace(/[™®©]/g, "").trim();
-  const squashed = raw.replace(/\s+/g, " ").trim();
-  [noStar, noMarks, noStarNoMarks, squashed].filter(Boolean).forEach((value) => variants.add(value));
-  return Array.from(variants).slice(0, 5);
+  const noStatTrak = noStarNoMarks.replace(/StatTrak\s*/gi, "").trim();
+  const noSouvenir = noStarNoMarks.replace(/Souvenir\s*/gi, "").trim();
+  const noWear = noStarNoMarks.replace(/\s*\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)\s*/gi, "").trim();
+  const noPhase = noWear
+    .replace(/Phase\s*[1-4]/gi, "")
+    .replace(/(Emerald|Ruby|Sapphire|Black Pearl)/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const skinOnly = noPhase.split("|").map((part) => part.trim()).filter(Boolean);
+  const knifeModel = skinOnly[0] || "";
+  const finishName = skinOnly[1] || "";
+
+  [noStar, noMarks, noStarNoMarks, noStatTrak, noSouvenir, noWear, noPhase].forEach(add);
+  if (knifeModel && finishName) {
+    add(`${knifeModel} | ${finishName}`);
+    add(`${knifeModel} ${finishName}`);
+  }
+  if (knifeModel) add(knifeModel);
+  if (finishName) add(finishName);
+
+  return Array.from(variants).slice(0, 12);
 }
 
 function scoreMarketResult(result, target) {
@@ -1107,20 +1131,27 @@ function scoreMarketResult(result, target) {
   if (names.length === 0) return -1;
 
   const normalizedTarget = normalizeMarketSearchText(target);
-  const targetParts = normalizedTarget.split("|").map((part) => part.trim()).filter(Boolean);
+  const targetWithoutWear = normalizedTarget.replace(/\s*\((factory new|minimal wear|field-tested|well-worn|battle-scarred)\)\s*/gi, "").trim();
+  const targetWithoutPhase = targetWithoutWear.replace(/phase\s*[1-4]/gi, "").replace(/(emerald|ruby|sapphire|black pearl)/gi, "").replace(/\s+/g, " ").trim();
+  const targetParts = targetWithoutPhase.split("|").map((part) => part.trim()).filter(Boolean);
   const wearMatch = normalizedTarget.match(/\(([^)]+)\)/);
   let best = -1;
 
   for (const candidateName of names) {
     const normalizedCandidate = normalizeMarketSearchText(candidateName);
+    const candidateWithoutWear = normalizedCandidate.replace(/\s*\((factory new|minimal wear|field-tested|well-worn|battle-scarred)\)\s*/gi, "").trim();
+    const candidateWithoutPhase = candidateWithoutWear.replace(/phase\s*[1-4]/gi, "").replace(/(emerald|ruby|sapphire|black pearl)/gi, "").replace(/\s+/g, " ").trim();
     let score = 0;
 
     if (normalizedCandidate === normalizedTarget) score += 100;
+    if (candidateWithoutWear === targetWithoutWear) score += 40;
+    if (candidateWithoutPhase === targetWithoutPhase) score += 35;
     if (normalizedCandidate.replace(/^stattrak\s+/i, "") === normalizedTarget.replace(/^stattrak\s+/i, "")) score += 20;
     if (normalizedCandidate.includes(normalizedTarget) || normalizedTarget.includes(normalizedCandidate)) score += 12;
+    if (candidateWithoutPhase.includes(targetWithoutPhase) || targetWithoutPhase.includes(candidateWithoutPhase)) score += 10;
 
     for (const part of targetParts) {
-      if (part && normalizedCandidate.includes(part)) score += 10;
+      if (part && candidateWithoutPhase.includes(part)) score += 10;
     }
 
     if (wearMatch && normalizedCandidate.includes(`(${normalizeMarketSearchText(wearMatch[1])})`)) score += 10;
@@ -1167,11 +1198,11 @@ async function getPriceSnapshot(marketHashName) {
           query,
           appid: "730",
           norender: "1",
-          count: "50",
+          count: "100",
           start: "0",
           search_descriptions: "0",
-          sort_column: "popular",
-          sort_dir: "desc",
+          sort_column: "name",
+          sort_dir: "asc",
         });
 
       const searchResponse = await fetch(searchUrl, {
@@ -1190,11 +1221,40 @@ async function getPriceSnapshot(marketHashName) {
       const results = Array.isArray(searchData?.results) ? searchData.results : [];
       const ranked = results
         .map((item) => ({ item, score: scoreMarketResult(item, marketHashName) }))
-        .filter((entry) => entry.score >= 20)
+        .filter((entry) => entry.score >= 10)
         .sort((a, b) => b.score - a.score);
 
       const exact = ranked[0]?.item;
       if (!exact) continue;
+
+      const candidateHashName = String(exact?.hash_name || exact?.asset_description?.market_hash_name || "").trim();
+      if (candidateHashName) {
+        try {
+          const candidateOverviewUrl =
+            "https://steamcommunity.com/market/priceoverview/?" +
+            new URLSearchParams({
+              appid: "730",
+              currency: "1",
+              country: "US",
+              market_hash_name: candidateHashName,
+            });
+          const candidateOverviewResponse = await fetch(candidateOverviewUrl, {
+            headers: {
+              "User-Agent": "LUDO-app local dev server",
+              Accept: "application/json, text/plain, */*",
+            },
+          });
+          if (candidateOverviewResponse.ok) {
+            const candidateOverviewData = await candidateOverviewResponse.json();
+            if (candidateOverviewData?.success) {
+              const candidateParsed = parsePriceString(candidateOverviewData.lowest_price) || parsePriceString(candidateOverviewData.median_price) || 0;
+              if (candidateParsed > 0) return candidateParsed;
+            }
+          }
+        } catch {
+          // ignore and continue to text/raw search result price
+        }
+      }
 
       const textPrice =
         parsePriceString(exact?.sell_price_text) ||
