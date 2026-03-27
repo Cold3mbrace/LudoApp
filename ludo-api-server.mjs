@@ -1076,6 +1076,62 @@ async function upsertPriceHistory(marketHashName, value) {
   return next;
 }
 
+function normalizeMarketSearchText(value = "") {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[★™®©]/g, " ")
+    .replace(/StatTrak\s*/gi, "stattrak ")
+    .replace(/Souvenir\s*/gi, "souvenir ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function marketSearchVariants(marketHashName) {
+  const raw = String(marketHashName || "").trim();
+  const variants = new Set([raw]);
+  const noStar = raw.replace(/^★\s*/u, "").trim();
+  const noMarks = raw.replace(/[™®©]/g, "").trim();
+  const noStarNoMarks = noStar.replace(/[™®©]/g, "").trim();
+  const squashed = raw.replace(/\s+/g, " ").trim();
+  [noStar, noMarks, noStarNoMarks, squashed].filter(Boolean).forEach((value) => variants.add(value));
+  return Array.from(variants).slice(0, 5);
+}
+
+function scoreMarketResult(result, target) {
+  const names = [result?.hash_name, result?.asset_description?.market_hash_name, result?.name]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  if (names.length === 0) return -1;
+
+  const normalizedTarget = normalizeMarketSearchText(target);
+  const targetParts = normalizedTarget.split("|").map((part) => part.trim()).filter(Boolean);
+  const wearMatch = normalizedTarget.match(/\(([^)]+)\)/);
+  let best = -1;
+
+  for (const candidateName of names) {
+    const normalizedCandidate = normalizeMarketSearchText(candidateName);
+    let score = 0;
+
+    if (normalizedCandidate === normalizedTarget) score += 100;
+    if (normalizedCandidate.replace(/^stattrak\s+/i, "") === normalizedTarget.replace(/^stattrak\s+/i, "")) score += 20;
+    if (normalizedCandidate.includes(normalizedTarget) || normalizedTarget.includes(normalizedCandidate)) score += 12;
+
+    for (const part of targetParts) {
+      if (part && normalizedCandidate.includes(part)) score += 10;
+    }
+
+    if (wearMatch && normalizedCandidate.includes(`(${normalizeMarketSearchText(wearMatch[1])})`)) score += 10;
+    if (/knife|bayonet|karambit|butterfly|talon|ursus|skeleton|stiletto|kukri|falchion|daggers|dagger|m9/i.test(candidateName)) score += 8;
+
+    best = Math.max(best, score);
+  }
+
+  return best;
+}
+
 async function getPriceSnapshot(marketHashName) {
   const filePath = path.join(PRICES_DIR, `${fileSafe(marketHashName)}.json`);
   const cached = await readJson(filePath, null);
@@ -1102,50 +1158,57 @@ async function getPriceSnapshot(marketHashName) {
   }
 
   const fetchSearchFallbackPrice = async () => {
-    const searchUrl =
-      "https://steamcommunity.com/market/search/render/?" +
-      new URLSearchParams({
-        query: marketHashName,
-        appid: "730",
-        norender: "1",
-        count: "10",
-        start: "0",
+    const variants = marketSearchVariants(marketHashName);
+
+    for (const query of variants) {
+      const searchUrl =
+        "https://steamcommunity.com/market/search/render/?" +
+        new URLSearchParams({
+          query,
+          appid: "730",
+          norender: "1",
+          count: "50",
+          start: "0",
+          search_descriptions: "0",
+          sort_column: "popular",
+          sort_dir: "desc",
+        });
+
+      const searchResponse = await fetch(searchUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 LUDO-app",
+          Accept: "application/json, text/plain, */*",
+          Referer: "https://steamcommunity.com/market/search?appid=730",
+        },
       });
 
-    const searchResponse = await fetch(searchUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 LUDO-app",
-        Accept: "application/json, text/plain, */*",
-        Referer: "https://steamcommunity.com/market/search?appid=730",
-      },
-    });
+      if (!searchResponse.ok) {
+        throw new Error(`Steam market search failed: ${searchResponse.status}`);
+      }
 
-    if (!searchResponse.ok) {
-      throw new Error(`Steam market search failed: ${searchResponse.status}`);
-    }
+      const searchData = await searchResponse.json();
+      const results = Array.isArray(searchData?.results) ? searchData.results : [];
+      const ranked = results
+        .map((item) => ({ item, score: scoreMarketResult(item, marketHashName) }))
+        .filter((entry) => entry.score >= 20)
+        .sort((a, b) => b.score - a.score);
 
-    const searchData = await searchResponse.json();
-    const results = Array.isArray(searchData?.results) ? searchData.results : [];
-    const target = String(marketHashName || "").trim().toLowerCase();
+      const exact = ranked[0]?.item;
+      if (!exact) continue;
 
-    const exact =
-      results.find((item) => String(item?.hash_name || item?.asset_description?.market_hash_name || "").trim().toLowerCase() === target) ||
-      results.find((item) => String(item?.name || item?.hash_name || "").trim().toLowerCase() === target) ||
-      results.find((item) => String(item?.hash_name || item?.name || "").trim().toLowerCase().includes(target));
+      const textPrice =
+        parsePriceString(exact?.sell_price_text) ||
+        parsePriceString(exact?.sale_price_text) ||
+        parsePriceString(exact?.normal_price_text) ||
+        parsePriceString(exact?.median_price_text);
 
-    if (!exact) return 0;
+      if (textPrice > 0) return textPrice;
 
-    const textPrice =
-      parsePriceString(exact?.sell_price_text) ||
-      parsePriceString(exact?.sale_price_text) ||
-      parsePriceString(exact?.normal_price_text);
-
-    if (textPrice > 0) return textPrice;
-
-    for (const field of ["sell_price", "sale_price", "normal_price"]) {
-      const raw = exact?.[field];
-      if (typeof raw === "number" && raw > 0) {
-        return raw / 100;
+      for (const field of ["sell_price", "sale_price", "normal_price"]) {
+        const raw = exact?.[field];
+        if (typeof raw === "number" && raw > 0) {
+          return raw / 100;
+        }
       }
     }
 
