@@ -1033,86 +1033,142 @@ async function getPriceSnapshot(marketHashName) {
   const filePath = path.join(PRICES_DIR, `${fileSafe(marketHashName)}.json`);
   const cached = await readJson(filePath, null);
 
-  if (cached?.updatedAt && Date.now() - cached.updatedAt < PRICE_TTL_MS) {
-    const history = Array.isArray(cached.history) ? cached.history : [];
+  const buildCachedResponse = () => {
+    const history = Array.isArray(cached?.history) ? cached.history : [];
     const last = history[history.length - 1];
     const prev = history[history.length - 2];
     const deltaPct = last && prev && prev.value > 0 ? ((last.value - prev.value) / prev.value) * 100 : 0;
     return {
       marketHashName,
-      price: Number(cached.lastValue || 0),
+      price: Number(cached?.lastValue || 0),
       history,
       deltaPct,
       cached: true,
     };
+  };
+
+  const cachedPrice = Number(cached?.lastValue || 0);
+  const cachedFresh = Boolean(cached?.updatedAt) && Date.now() - Number(cached.updatedAt || 0) < PRICE_TTL_MS;
+
+  // Нулевой кэш не считаем валидным: иначе инвентарь залипает на $0.00 на часы.
+  if (cachedFresh && cachedPrice > 0) {
+    return buildCachedResponse();
   }
 
-  const url =
-    "https://steamcommunity.com/market/priceoverview/?" +
-    new URLSearchParams({
-      appid: "730",
-      currency: "1",
-      country: "US",
-      market_hash_name: marketHashName,
+  const fetchSearchFallbackPrice = async () => {
+    const searchUrl =
+      "https://steamcommunity.com/market/search/render/?" +
+      new URLSearchParams({
+        query: marketHashName,
+        appid: "730",
+        norender: "1",
+        count: "10",
+        start: "0",
+      });
+
+    const searchResponse = await fetch(searchUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 LUDO-app",
+        Accept: "application/json, text/plain, */*",
+        Referer: "https://steamcommunity.com/market/search?appid=730",
+      },
     });
 
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "LUDO-app local dev server",
-      Accept: "application/json, text/plain, */*",
-    },
-  });
-
-  if (!response.ok) {
-    if (cached) {
-      const history = Array.isArray(cached.history) ? cached.history : [];
-      const last = history[history.length - 1];
-      const prev = history[history.length - 2];
-      const deltaPct = last && prev && prev.value > 0 ? ((last.value - prev.value) / prev.value) * 100 : 0;
-      return {
-        marketHashName,
-        price: Number(cached.lastValue || 0),
-        history,
-        deltaPct,
-        cached: true,
-      };
+    if (!searchResponse.ok) {
+      throw new Error(`Steam market search failed: ${searchResponse.status}`);
     }
-    throw new Error(`Steam market price failed: ${response.status}`);
-  }
 
-  const data = await response.json();
-  if (!data?.success) {
-    if (cached) {
-      const history = Array.isArray(cached.history) ? cached.history : [];
-      const last = history[history.length - 1];
-      const prev = history[history.length - 2];
-      const deltaPct = last && prev && prev.value > 0 ? ((last.value - prev.value) / prev.value) * 100 : 0;
-      return {
-        marketHashName,
-        price: Number(cached.lastValue || 0),
-        history,
-        deltaPct,
-        cached: true,
-      };
+    const searchData = await searchResponse.json();
+    const results = Array.isArray(searchData?.results) ? searchData.results : [];
+    const target = String(marketHashName || "").trim().toLowerCase();
+
+    const exact =
+      results.find((item) => String(item?.hash_name || item?.asset_description?.market_hash_name || "").trim().toLowerCase() === target) ||
+      results.find((item) => String(item?.name || item?.hash_name || "").trim().toLowerCase() === target) ||
+      results.find((item) => String(item?.hash_name || item?.name || "").trim().toLowerCase().includes(target));
+
+    if (!exact) return 0;
+
+    const textPrice =
+      parsePriceString(exact?.sell_price_text) ||
+      parsePriceString(exact?.sale_price_text) ||
+      parsePriceString(exact?.normal_price_text);
+
+    if (textPrice > 0) return textPrice;
+
+    for (const field of ["sell_price", "sale_price", "normal_price"]) {
+      const raw = exact?.[field];
+      if (typeof raw === "number" && raw > 0) {
+        return raw / 100;
+      }
     }
-    return { marketHashName, price: 0, history: [], deltaPct: 0, cached: false };
-  }
 
-  const parsed = parsePriceString(data.lowest_price) || parsePriceString(data.median_price) || 0;
-  const historyRecord = await upsertPriceHistory(marketHashName, parsed);
-  const history = Array.isArray(historyRecord.history) ? historyRecord.history : [];
-  const last = history[history.length - 1];
-  const prev = history[history.length - 2];
-  const deltaPct = last && prev && prev.value > 0 ? ((last.value - prev.value) / prev.value) * 100 : 0;
-  await sleep(150);
-
-  return {
-    marketHashName,
-    price: parsed,
-    history,
-    deltaPct,
-    cached: false,
+    return 0;
   };
+
+  let parsed = 0;
+
+  try {
+    const url =
+      "https://steamcommunity.com/market/priceoverview/?" +
+      new URLSearchParams({
+        appid: "730",
+        currency: "1",
+        country: "US",
+        market_hash_name: marketHashName,
+      });
+
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "LUDO-app local dev server",
+        Accept: "application/json, text/plain, */*",
+      },
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data?.success) {
+        parsed = parsePriceString(data.lowest_price) || parsePriceString(data.median_price) || 0;
+      }
+    } else if (cachedPrice > 0) {
+      return buildCachedResponse();
+    }
+  } catch {
+    if (cachedPrice > 0) {
+      return buildCachedResponse();
+    }
+  }
+
+  if (parsed <= 0) {
+    try {
+      parsed = await fetchSearchFallbackPrice();
+    } catch {
+      // fallback below
+    }
+  }
+
+  if (parsed > 0) {
+    const historyRecord = await upsertPriceHistory(marketHashName, parsed);
+    const history = Array.isArray(historyRecord.history) ? historyRecord.history : [];
+    const last = history[history.length - 1];
+    const prev = history[history.length - 2];
+    const deltaPct = last && prev && prev.value > 0 ? ((last.value - prev.value) / prev.value) * 100 : 0;
+    await sleep(150);
+
+    return {
+      marketHashName,
+      price: parsed,
+      history,
+      deltaPct,
+      cached: false,
+    };
+  }
+
+  if (cachedPrice > 0) {
+    return buildCachedResponse();
+  }
+
+  return { marketHashName, price: 0, history: [], deltaPct: 0, cached: false };
 }
 
 async function mapWithConcurrency(items, worker, concurrency = 3) {
