@@ -99,6 +99,7 @@ type WeeklyGoal = {
   createdAt: number;
   updatedAt?: number;
   updatedBy?: number | null;
+  assignee?: string | null;
 };
 
 type WeeklyGoalsPayload = {
@@ -106,6 +107,9 @@ type WeeklyGoalsPayload = {
   title: string;
   items: WeeklyGoal[];
 };
+
+const WEEKLY_GOAL_ASSIGNEES = ["Костя", "Максим"] as const;
+type WeeklyGoalAssignee = typeof WEEKLY_GOAL_ASSIGNEES[number];
 
 type HistoryPoint = { ts: number; value: number };
 
@@ -402,6 +406,22 @@ function formatAxisLabel(ts: number, range: RangeId) {
   return date.toLocaleDateString("ru-RU", { month: "short", year: "2-digit" });
 }
 
+
+function startOfWeekInput(date = new Date()) {
+  const current = new Date(date);
+  const day = current.getDay() || 7;
+  current.setHours(0, 0, 0, 0);
+  current.setDate(current.getDate() - day + 1);
+  return current.toISOString().slice(0, 10);
+}
+
+function shiftWeekKey(weekKey: string, diff: number) {
+  const base = weekKey ? new Date(`${weekKey}T00:00:00`) : new Date();
+  if (Number.isNaN(base.getTime())) return startOfWeekInput();
+  base.setDate(base.getDate() + diff * 7);
+  return startOfWeekInput(base);
+}
+
 function filterHistory(points: HistoryPoint[], range: RangeId) {
   const now = Date.now();
   const ms = {
@@ -438,6 +458,30 @@ function initials(name: string) {
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase() || "")
     .join("");
+}
+
+function startOfWeekIsoLocal(date = new Date()) {
+  const copy = new Date(date);
+  const day = copy.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  copy.setHours(0, 0, 0, 0);
+  copy.setDate(copy.getDate() + diff);
+  return copy.toISOString().slice(0, 10);
+}
+
+function shiftWeekIso(weekKey: string, offset: number) {
+  const base = new Date(`${weekKey || startOfWeekIsoLocal()}T00:00:00`);
+  base.setDate(base.getDate() + offset * 7);
+  return startOfWeekIsoLocal(base);
+}
+
+function formatWeekTitleLocal(weekKey: string) {
+  const start = new Date(`${weekKey}T00:00:00`);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6);
+  const startLabel = start.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+  const endLabel = end.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+  return `Неделя ${startLabel}–${endLabel}`;
 }
 
 function loadLocalState(key: string): ProfileState {
@@ -639,6 +683,8 @@ export default function App() {
   const [weeklyGoals, setWeeklyGoals] = useState<WeeklyGoalsPayload>({ weekKey: "", title: "Цели недели", items: [] });
   const [weeklyGoalsLoading, setWeeklyGoalsLoading] = useState(false);
   const [weeklyGoalDraft, setWeeklyGoalDraft] = useState("");
+  const [weeklyGoalAssignee, setWeeklyGoalAssignee] = useState<WeeklyGoalAssignee>("Костя");
+  const [selectedGoalsWeekKey, setSelectedGoalsWeekKey] = useState(startOfWeekIsoLocal());
   const [weeklyGoalStatus, setWeeklyGoalStatus] = useState("");
   const [showIntro, setShowIntro] = useState(false);
   const [introReady, setIntroReady] = useState(false);
@@ -948,7 +994,8 @@ export default function App() {
       setSteamAvatar(data?.profile?.avatarfull || null);
       const marketableCount = Number(data?.marketableCount || items.filter((item) => item.marketable).length || 0);
       const pricedCount = Number(data?.pricedCount || items.filter((item) => item.price > 0).length || 0);
-      setInventoryStatus(`Steam подключен. Позиций: ${items.length}. Оценено ${pricedCount} из ${marketableCount || items.length}. Сумма: ${money(Number(data?.totalValue || 0))}.`);
+      const freshnessHint = data?.stale ? " Показаны последние сохранённые данные Steam." : data?.cached ? " Данные взяты из кэша." : "";
+      setInventoryStatus(`Steam подключен. Позиций: ${items.length}. Оценено ${pricedCount} из ${marketableCount || items.length}. Сумма: ${money(Number(data?.totalValue || 0))}.${freshnessHint}`);
       setProfileState((current) => ({
         ...current,
         steam: {
@@ -962,7 +1009,10 @@ export default function App() {
       awardPassTask("connect_steam");
       if (items.length) setSelectedItemHash(items[0].marketHashName);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Не удалось подключить Steam.";
+      const rawMessage = error instanceof Error ? error.message : "Не удалось подключить Steam.";
+      const message = rawMessage.includes("429")
+        ? "Steam временно режет запросы. Подожди немного — если на сервере есть сохранённые данные, они подтянутся сами."
+        : rawMessage;
       setSteamError(message);
       setInventoryStatus(message);
     } finally {
@@ -978,7 +1028,7 @@ export default function App() {
   }, [apiBase, backendHydrated, profileState.steam.input, steamInput, inventory.length, steamLoading, connectSteam]);
 
   const refreshInventory = useCallback(async () => {
-    await connectSteam(true);
+    await connectSteam(false);
   }, [connectSteam]);
 
   useEffect(() => {
@@ -1444,31 +1494,33 @@ export default function App() {
     }
   }, [apiBase, isAdmin, tgUserId]);
 
-  const fetchWeeklyGoals = useCallback(async () => {
+  const fetchWeeklyGoals = useCallback(async (requestedWeekKey?: string) => {
     if (!apiBase || !isAdmin || !tgUserId) return;
+    const weekKey = requestedWeekKey || selectedGoalsWeekKey || startOfWeekIsoLocal();
     try {
       setWeeklyGoalsLoading(true);
-      const response = await fetch(`${apiBase}/api/admin/goals?adminId=${tgUserId}`);
+      const response = await fetch(`${apiBase}/api/admin/goals?adminId=${tgUserId}&weekKey=${encodeURIComponent(weekKey)}`);
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(data?.error || "weekly_goals_fetch");
       setWeeklyGoals({
-        weekKey: String(data?.weekKey || ""),
-        title: String(data?.title || "Цели недели"),
+        weekKey: String(data?.weekKey || weekKey),
+        title: String(data?.title || formatWeekTitleLocal(weekKey)),
         items: Array.isArray(data?.items) ? data.items : [],
       });
+      setSelectedGoalsWeekKey(String(data?.weekKey || weekKey));
       setWeeklyGoalStatus("");
     } catch (error) {
       setWeeklyGoalStatus(error instanceof Error ? error.message : "Не удалось загрузить цели недели.");
     } finally {
       setWeeklyGoalsLoading(false);
     }
-  }, [apiBase, isAdmin, tgUserId]);
+  }, [apiBase, isAdmin, tgUserId, selectedGoalsWeekKey]);
 
   useEffect(() => {
     if (profileSection === "admin" && isAdmin) {
-      fetchWeeklyGoals();
+      fetchWeeklyGoals(selectedGoalsWeekKey);
     }
-  }, [profileSection, isAdmin, fetchWeeklyGoals]);
+  }, [profileSection, isAdmin, fetchWeeklyGoals, selectedGoalsWeekKey]);
 
   const addWeeklyGoal = useCallback(async () => {
     if (!apiBase || !isAdmin || !tgUserId) return;
@@ -1481,13 +1533,13 @@ export default function App() {
       const response = await fetch(`${apiBase}/api/admin/goals`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ adminId: tgUserId, text }),
+        body: JSON.stringify({ adminId: tgUserId, actorName: userIdentity.name, text, assignee: weeklyGoalAssignee, weekKey: selectedGoalsWeekKey }),
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(data?.error || "weekly_goal_add");
       setWeeklyGoals({
-        weekKey: String(data?.weekKey || ""),
-        title: String(data?.title || "Цели недели"),
+        weekKey: String(data?.weekKey || selectedGoalsWeekKey),
+        title: String(data?.title || formatWeekTitleLocal(selectedGoalsWeekKey)),
         items: Array.isArray(data?.items) ? data.items : [],
       });
       setWeeklyGoalDraft("");
@@ -1495,7 +1547,7 @@ export default function App() {
     } catch (error) {
       setWeeklyGoalStatus(error instanceof Error ? error.message : "Не удалось добавить цель.");
     }
-  }, [apiBase, isAdmin, tgUserId, weeklyGoalDraft]);
+  }, [apiBase, isAdmin, tgUserId, weeklyGoalDraft, weeklyGoalAssignee, selectedGoalsWeekKey, userIdentity.name]);
 
   const toggleWeeklyGoal = useCallback(async (goalId: string) => {
     if (!apiBase || !isAdmin || !tgUserId) return;
@@ -1503,41 +1555,51 @@ export default function App() {
       const response = await fetch(`${apiBase}/api/admin/goals/${encodeURIComponent(goalId)}/toggle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ adminId: tgUserId }),
+        body: JSON.stringify({ adminId: tgUserId, actorName: userIdentity.name, weekKey: selectedGoalsWeekKey }),
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(data?.error || "weekly_goal_toggle");
       setWeeklyGoals({
-        weekKey: String(data?.weekKey || ""),
-        title: String(data?.title || "Цели недели"),
-        items: Array.isArray(data?.items) ? data.items : [],
+        weekKey: String(data?.weekKey || weeklyGoals.weekKey),
+        title: String(data?.title || weeklyGoals.title || formatWeekTitleLocal(selectedGoalsWeekKey)),
+        items: Array.isArray(data?.items) ? data.items : weeklyGoals.items,
       });
       setWeeklyGoalStatus("");
     } catch (error) {
       setWeeklyGoalStatus(error instanceof Error ? error.message : "Не удалось отметить цель.");
     }
-  }, [apiBase, isAdmin, tgUserId]);
+  }, [apiBase, isAdmin, tgUserId, weeklyGoals, selectedGoalsWeekKey, userIdentity.name]);
 
   const deleteWeeklyGoal = useCallback(async (goalId: string) => {
     if (!apiBase || !isAdmin || !tgUserId) return;
     try {
-      const response = await fetch(`${apiBase}/api/admin/goals/${encodeURIComponent(goalId)}`, {
+      const response = await fetch(`${apiBase}/api/admin/goals/${encodeURIComponent(goalId)}?adminId=${tgUserId}&weekKey=${encodeURIComponent(selectedGoalsWeekKey)}`, {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ adminId: tgUserId }),
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(data?.error || "weekly_goal_delete");
       setWeeklyGoals({
-        weekKey: String(data?.weekKey || ""),
-        title: String(data?.title || "Цели недели"),
+        weekKey: String(data?.weekKey || weeklyGoals.weekKey),
+        title: String(data?.title || weeklyGoals.title || formatWeekTitleLocal(selectedGoalsWeekKey)),
         items: Array.isArray(data?.items) ? data.items : [],
       });
       setWeeklyGoalStatus("");
     } catch (error) {
       setWeeklyGoalStatus(error instanceof Error ? error.message : "Не удалось удалить цель.");
     }
-  }, [apiBase, isAdmin, tgUserId]);
+  }, [apiBase, isAdmin, tgUserId, weeklyGoals, selectedGoalsWeekKey]);
+
+  const openGoalsWeek = useCallback((offset: number) => {
+    const nextWeekKey = shiftWeekIso(selectedGoalsWeekKey || startOfWeekIsoLocal(), offset);
+    setSelectedGoalsWeekKey(nextWeekKey);
+    setWeeklyGoalStatus("");
+  }, [selectedGoalsWeekKey]);
+
+  const resetGoalsWeekToCurrent = useCallback(() => {
+    const currentWeekKey = startOfWeekIsoLocal();
+    setSelectedGoalsWeekKey(currentWeekKey);
+    setWeeklyGoalStatus("");
+  }, []);
 
   const shareNews = useCallback((item: FeedItem) => {
     const link = item.url || window.location.href;
@@ -2195,13 +2257,33 @@ export default function App() {
                     <Button onClick={() => fetchWeeklyGoals()} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Обновить</Button>
                   </div>
 
-                  <div className="mt-3 flex gap-2">
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <Button onClick={() => openGoalsWeek(-1)} className="rounded-2xl border border-white/10 bg-white/10 px-3 text-white hover:bg-white/15">← Неделя</Button>
+                    <Input
+                      type="date"
+                      value={selectedGoalsWeekKey || weeklyGoals.weekKey || ""}
+                      onChange={(event) => setSelectedGoalsWeekKey(event.target.value)}
+                      className="w-[180px] rounded-2xl border-white/10 bg-black/20 text-white"
+                    />
+                    <Button onClick={() => fetchWeeklyGoals(selectedGoalsWeekKey || weeklyGoals.weekKey || startOfWeekIsoLocal())} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Открыть</Button>
+                    <Button onClick={() => openGoalsWeek(1)} className="rounded-2xl border border-white/10 bg-white/10 px-3 text-white hover:bg-white/15">Неделя →</Button>
+                  </div>
+
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                     <Input
                       value={weeklyGoalDraft}
                       onChange={(event) => setWeeklyGoalDraft(event.target.value)}
                       placeholder="Например: добить ножи, выгрузить пост, проверить тикеты"
                       className="rounded-2xl border-white/10 bg-black/20 text-white placeholder:text-neutral-500"
                     />
+                    <select
+                      value={weeklyGoalAssignee}
+                      onChange={(event) => setWeeklyGoalAssignee(event.target.value as WeeklyGoalAssignee)}
+                      className="h-10 rounded-2xl border border-white/10 bg-black/20 px-3 text-sm text-white"
+                    >
+                      <option value="Костя">Костя</option>
+                      <option value="Максим">Максим</option>
+                    </select>
                     <Button onClick={addWeeklyGoal} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">
                       <Plus className="mr-2 h-4 w-4" />Добавить
                     </Button>
@@ -2221,9 +2303,12 @@ export default function App() {
                           <CheckCircle2 className="h-5 w-5" />
                         </button>
                         <div className="min-w-0 flex-1">
-                          <div className={`text-sm font-medium ${goal.done ? "text-emerald-50 line-through decoration-emerald-200/60" : "text-white"}`}>{index + 1}. {goal.text}</div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className={`text-sm font-medium ${goal.done ? "text-emerald-50 line-through decoration-emerald-200/60" : "text-white"}`}>{index + 1}. {goal.text}</div>
+                            {goal.assignee ? <span className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-cyan-100">{goal.assignee}</span> : null}
+                          </div>
                           <div className="mt-1 text-[11px] text-neutral-500">
-                            {goal.done ? "Сделано" : "В работе"}{goal.updatedAt ? ` · ${timeAgoRu(Math.floor(goal.updatedAt / 1000))}` : ""}{goal.updatedBy ? ` · admin ${goal.updatedBy}` : ""}
+                            {goal.done ? "Сделано" : "В работе"}{goal.updatedAt ? ` · ${timeAgoRu(Math.floor(goal.updatedAt / 1000))}` : ""}{goal.updatedByName ? ` · ${goal.updatedByName}` : goal.updatedBy ? ` · admin ${goal.updatedBy}` : ""}
                           </div>
                         </div>
                         <button

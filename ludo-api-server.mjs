@@ -25,6 +25,7 @@ const ACTIVITY_PATH = path.join(DATA_DIR, "activity.json");
 const PRICE_TTL_MS = 1000 * 60 * 60 * 6;
 const PRICE_HISTORY_MIN_INTERVAL_MS = 1000 * 60 * 60 * 12;
 const INVENTORY_TTL_MS = 1000 * 60 * 12;
+const INVENTORY_FORCE_COOLDOWN_MS = 1000 * 45;
 const NEWS_TTL_MS = 1000 * 60 * 20;
 const WEEK_MS = 1000 * 60 * 60 * 24 * 7;
 const PASS_SEASON_KEY = "LUDO_S1_BETA";
@@ -500,33 +501,132 @@ function formatWeekTitle(weekKey) {
   return `Неделя ${startLabel}–${endLabel}`;
 }
 
-async function readWeeklyGoals() {
-  const weekKey = startOfWeekIso();
-  const raw = await readJson(WEEKLY_GOALS_PATH, null);
-  const items = Array.isArray(raw?.items) ? raw.items : [];
-  if (raw?.weekKey === weekKey) {
+function normalizeWeekKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return startOfWeekIso();
+  const parsed = new Date(`${raw}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) return startOfWeekIso();
+  return startOfWeekIso(parsed);
+}
+
+function defaultWeeklyGoalsItems(weekKey) {
+  const now = Date.now();
+  return [
+    {
+      id: `seed-${weekKey}-kostya-1`,
+      text: "Добить стабильность инвентаря и проверить, что 429 не роняет экран.",
+      assignee: "Костя",
+      done: false,
+      createdAt: now,
+      updatedAt: now,
+      updatedBy: null,
+      updatedByName: "LUDO",
+    },
+    {
+      id: `seed-${weekKey}-kostya-2`,
+      text: "Проверить главную, PASS и радар после деплоя без новых багов.",
+      assignee: "Костя",
+      done: false,
+      createdAt: now,
+      updatedAt: now,
+      updatedBy: null,
+      updatedByName: "LUDO",
+    },
+    {
+      id: `seed-${weekKey}-maksim-1`,
+      text: "Закрыть свой кусок по проекту и отписаться по результату в админке, а не исчезать.",
+      assignee: "Максим",
+      done: false,
+      createdAt: now,
+      updatedAt: now,
+      updatedBy: null,
+      updatedByName: "LUDO",
+    },
+    {
+      id: `seed-${weekKey}-maksim-2`,
+      text: "Проверить тикеты и отметить, что реально сделано за неделю.",
+      assignee: "Максим",
+      done: false,
+      createdAt: now,
+      updatedAt: now,
+      updatedBy: null,
+      updatedByName: "LUDO",
+    },
+  ];
+}
+
+function normalizeGoalsItems(items) {
+  return (Array.isArray(items) ? items : []).map((goal) => ({
+    id: String(goal?.id || crypto.randomUUID()),
+    text: String(goal?.text || "").slice(0, 240),
+    done: Boolean(goal?.done),
+    assignee: goal?.assignee ? String(goal.assignee).slice(0, 40) : null,
+    createdAt: Number(goal?.createdAt || Date.now()),
+    updatedAt: Number(goal?.updatedAt || Date.now()),
+    updatedBy: goal?.updatedBy == null ? null : Number(goal.updatedBy),
+    updatedByName: goal?.updatedByName ? String(goal.updatedByName).slice(0, 80) : null,
+  })).filter((goal) => goal.text);
+}
+
+function normalizeWeeklyGoalsStore(raw) {
+  if (raw && raw.weeks && typeof raw.weeks === "object") {
+    const weeks = Object.fromEntries(
+      Object.entries(raw.weeks).map(([weekKey, payload]) => {
+        const normalizedWeek = normalizeWeekKey(weekKey);
+        return [normalizedWeek, {
+          weekKey: normalizedWeek,
+          title: String(payload?.title || formatWeekTitle(normalizedWeek)),
+          items: normalizeGoalsItems(payload?.items),
+        }];
+      })
+    );
+    return { weeks };
+  }
+
+  if (raw && (raw.weekKey || raw.items)) {
+    const weekKey = normalizeWeekKey(raw.weekKey);
     return {
-      weekKey,
-      title: String(raw?.title || formatWeekTitle(weekKey)),
-      items,
+      weeks: {
+        [weekKey]: {
+          weekKey,
+          title: String(raw?.title || formatWeekTitle(weekKey)),
+          items: normalizeGoalsItems(raw?.items),
+        },
+      },
     };
   }
-  const reset = {
-    weekKey,
-    title: formatWeekTitle(weekKey),
-    items: [],
-  };
-  await writeJson(WEEKLY_GOALS_PATH, reset);
-  return reset;
+
+  return { weeks: {} };
+}
+
+async function readWeeklyGoals(weekKeyInput) {
+  const weekKey = normalizeWeekKey(weekKeyInput);
+  const raw = await readJson(WEEKLY_GOALS_PATH, null);
+  const store = normalizeWeeklyGoalsStore(raw);
+  let week = store.weeks[weekKey];
+  if (!week) {
+    week = {
+      weekKey,
+      title: formatWeekTitle(weekKey),
+      items: weekKey === startOfWeekIso() ? defaultWeeklyGoalsItems(weekKey) : [],
+    };
+    store.weeks[weekKey] = week;
+    await writeJson(WEEKLY_GOALS_PATH, store);
+  }
+  return week;
 }
 
 async function writeWeeklyGoals(payload) {
+  const weekKey = normalizeWeekKey(payload?.weekKey);
+  const raw = await readJson(WEEKLY_GOALS_PATH, null);
+  const store = normalizeWeeklyGoalsStore(raw);
   const next = {
-    weekKey: String(payload?.weekKey || startOfWeekIso()),
-    title: String(payload?.title || formatWeekTitle(String(payload?.weekKey || startOfWeekIso()))),
-    items: Array.isArray(payload?.items) ? payload.items : [],
+    weekKey,
+    title: String(payload?.title || formatWeekTitle(weekKey)),
+    items: normalizeGoalsItems(payload?.items),
   };
-  await writeJson(WEEKLY_GOALS_PATH, next);
+  store.weeks[weekKey] = next;
+  await writeJson(WEEKLY_GOALS_PATH, store);
   return next;
 }
 
@@ -1053,26 +1153,42 @@ function inventoryCachePath(steamId) {
 async function getInventory(steamId, { force = false } = {}) {
   const cachePath = inventoryCachePath(steamId);
   const cached = await readJson(cachePath, null);
-  if (!force && cached?.updatedAt && Date.now() - cached.updatedAt < INVENTORY_TTL_MS) {
-    return { payload: cached.payload, cached: true, stale: false };
+  const cacheAge = cached?.updatedAt ? Date.now() - Number(cached.updatedAt || 0) : Number.POSITIVE_INFINITY;
+
+  if (cached?.updatedAt && cacheAge < INVENTORY_TTL_MS) {
+    return { payload: cached.payload, cache: cached, cached: true, stale: false, rateLimited: false };
+  }
+
+  if (force && cached?.updatedAt && cacheAge < INVENTORY_FORCE_COOLDOWN_MS) {
+    return { payload: cached.payload, cache: cached, cached: true, stale: false, rateLimited: false };
   }
 
   const counts = [2000, 1000, 500, 200];
   let lastError = null;
+  let rateLimited = false;
 
   for (const count of counts) {
     try {
       const payload = await fetchInventoryOnce(steamId, count);
-      await writeJson(cachePath, { updatedAt: Date.now(), payload });
-      return { payload, cached: false, stale: false };
+      const nextCache = { updatedAt: Date.now(), payload };
+      await writeJson(cachePath, nextCache);
+      return { payload, cache: nextCache, cached: false, stale: false, rateLimited: false };
     } catch (error) {
       lastError = error;
-      console.warn(`[inventory] steamId=${steamId} count=${count} -> ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("429")) {
+        rateLimited = true;
+        if (cached?.payload) {
+          return { payload: cached.payload, cache: cached, cached: true, stale: true, rateLimited: true };
+        }
+        break;
+      }
+      console.warn(`[inventory] steamId=${steamId} count=${count} -> ${message}`);
     }
   }
 
   if (cached?.payload) {
-    return { payload: cached.payload, cached: true, stale: true };
+    return { payload: cached.payload, cache: cached, cached: true, stale: true, rateLimited };
   }
 
   throw lastError || new Error("Не удалось загрузить Steam inventory.");
@@ -1883,7 +1999,8 @@ app.get("/api/admin/goals", async (req, res) => {
       res.status(403).json({ error: "Нет доступа." });
       return;
     }
-    const goals = await readWeeklyGoals();
+    const weekKey = String(req.query.weekKey || "");
+    const goals = await readWeeklyGoals(weekKey);
     res.json({ ok: true, ...goals });
   } catch (error) {
     res.status(400).json({
@@ -1900,20 +2017,26 @@ app.post("/api/admin/goals", async (req, res) => {
       return;
     }
     const text = String(req.body?.text || "").trim();
+    const weekKey = String(req.body?.weekKey || "");
+    const assigneeRaw = String(req.body?.assignee || "").trim();
+    const actorName = String(req.body?.actorName || "").trim();
     if (!text) throw new Error("Напиши цель перед добавлением.");
 
-    const current = await readWeeklyGoals();
+    const current = await readWeeklyGoals(weekKey);
     const item = {
       id: crypto.randomUUID(),
       text: text.slice(0, 240),
+      assignee: assigneeRaw ? assigneeRaw.slice(0, 40) : null,
       done: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       updatedBy: adminId,
+      updatedByName: actorName ? actorName.slice(0, 80) : null,
     };
     const next = await writeWeeklyGoals({
       ...current,
-      items: [item, ...current.items].slice(0, 50),
+      weekKey: current.weekKey,
+      items: [item, ...current.items].slice(0, 80),
     });
     res.json({ ok: true, ...next, item });
   } catch (error) {
@@ -1931,13 +2054,15 @@ app.post("/api/admin/goals/:id/toggle", async (req, res) => {
       return;
     }
     const goalId = String(req.params?.id || "").trim();
-    const current = await readWeeklyGoals();
+    const weekKey = String(req.body?.weekKey || "");
+    const actorName = String(req.body?.actorName || "").trim();
+    const current = await readWeeklyGoals(weekKey);
     const items = current.items.map((goal) =>
       goal?.id === goalId
-        ? { ...goal, done: !Boolean(goal?.done), updatedAt: Date.now(), updatedBy: adminId }
+        ? { ...goal, done: !Boolean(goal?.done), updatedAt: Date.now(), updatedBy: adminId, updatedByName: actorName ? actorName.slice(0, 80) : (goal?.updatedByName || null) }
         : goal
     );
-    const next = await writeWeeklyGoals({ ...current, items });
+    const next = await writeWeeklyGoals({ ...current, weekKey: current.weekKey, items });
     const item = next.items.find((goal) => goal?.id === goalId) || null;
     res.json({ ok: true, ...next, item });
   } catch (error) {
@@ -1955,9 +2080,10 @@ app.delete("/api/admin/goals/:id", async (req, res) => {
       return;
     }
     const goalId = String(req.params?.id || "").trim();
-    const current = await readWeeklyGoals();
+    const weekKey = String(req.body?.weekKey || req.query?.weekKey || "");
+    const current = await readWeeklyGoals(weekKey);
     const items = current.items.filter((goal) => goal?.id !== goalId);
-    const next = await writeWeeklyGoals({ ...current, items });
+    const next = await writeWeeklyGoals({ ...current, weekKey: current.weekKey, items });
     res.json({ ok: true, ...next });
   } catch (error) {
     res.status(400).json({
@@ -2112,42 +2238,49 @@ app.get("/api/steam/inventory", async (req, res) => {
     const inventoryResult = await getInventory(resolved.steamId, { force });
     const inventoryPayload = inventoryResult.payload;
 
-    const descriptions = Array.isArray(inventoryPayload?.descriptions) ? inventoryPayload.descriptions : [];
-    const uniqueNames = [
-      ...new Set(
-        descriptions
-          .map((entry) => entry?.market_hash_name || entry?.name)
-          .filter(Boolean)
-      ),
-    ].filter(Boolean);
+    let items = Array.isArray(inventoryResult?.cache?.items) ? inventoryResult.cache.items : [];
+    let totalValue = Number(inventoryResult?.cache?.totalValue || 0);
+    let marketableCount = items.filter((item) => item.marketable).length;
+    let pricedCount = items.filter((item) => item.price > 0).length;
 
-    const pricedEntries = await mapWithConcurrency(
-      uniqueNames,
-      async (name) => {
-        try {
-          return [name, await getPriceSnapshot(name)];
-        } catch (error) {
-          console.warn("[price]", name, error instanceof Error ? error.message : String(error));
-          return [name, { marketHashName: name, price: 0, history: [], deltaPct: 0 }];
-        }
-      },
-      2
-    );
+    if (!items.length || !inventoryResult.stale) {
+      const descriptions = Array.isArray(inventoryPayload?.descriptions) ? inventoryPayload.descriptions : [];
+      const uniqueNames = [
+        ...new Set(
+          descriptions
+            .map((entry) => entry?.market_hash_name || entry?.name)
+            .filter(Boolean)
+        ),
+      ].filter(Boolean);
 
-    const priceMap = Object.fromEntries(pricedEntries);
-    const items = buildInventoryItems(inventoryPayload, priceMap);
-    const totalValue = items.reduce((sum, item) => sum + item.totalValue, 0);
-    const marketableCount = items.filter((item) => item.marketable).length;
-    const pricedCount = items.filter((item) => item.price > 0).length;
+      const pricedEntries = await mapWithConcurrency(
+        uniqueNames,
+        async (name) => {
+          try {
+            return [name, await getPriceSnapshot(name)];
+          } catch (error) {
+            console.warn("[price]", name, error instanceof Error ? error.message : String(error));
+            return [name, { marketHashName: name, price: 0, history: [], deltaPct: 0 }];
+          }
+        },
+        inventoryResult.rateLimited ? 1 : 2
+      );
 
-    await writeJson(inventoryCachePath(resolved.steamId), {
-      updatedAt: Date.now(),
-      payload: inventoryPayload,
-      items,
-      totalValue,
-      personaname: summary?.personaname || resolved.profile?.personaname || null,
-      profile: summary || resolved.profile || null,
-    });
+      const priceMap = Object.fromEntries(pricedEntries);
+      items = buildInventoryItems(inventoryPayload, priceMap);
+      totalValue = items.reduce((sum, item) => sum + item.totalValue, 0);
+      marketableCount = items.filter((item) => item.marketable).length;
+      pricedCount = items.filter((item) => item.price > 0).length;
+
+      await writeJson(inventoryCachePath(resolved.steamId), {
+        updatedAt: Date.now(),
+        payload: inventoryPayload,
+        items,
+        totalValue,
+        personaname: summary?.personaname || resolved.profile?.personaname || null,
+        profile: summary || resolved.profile || null,
+      });
+    }
 
     const user = await readUserState(key);
     user.steam = {
@@ -2172,6 +2305,8 @@ app.get("/api/steam/inventory", async (req, res) => {
       updatedAt: Date.now(),
       cached: inventoryResult.cached,
       stale: inventoryResult.stale,
+      rateLimited: inventoryResult.rateLimited,
+      message: inventoryResult.rateLimited ? "Steam временно режет запросы, поэтому отдали последние сохранённые данные." : null,
     });
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error);
