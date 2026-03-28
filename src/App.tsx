@@ -16,10 +16,13 @@ import {
   Loader2,
   MessageCircle,
   Newspaper,
+  Plus,
   Radar,
   RefreshCw,
   Search,
   Share2,
+  Target,
+  Trash2,
   User,
   Users,
   Wallet,
@@ -87,6 +90,21 @@ type Ticket = {
     handle?: string | null;
     userId?: number | null;
   };
+};
+
+type WeeklyGoal = {
+  id: string;
+  text: string;
+  done: boolean;
+  createdAt: number;
+  updatedAt?: number;
+  updatedBy?: number | null;
+};
+
+type WeeklyGoalsPayload = {
+  weekKey: string;
+  title: string;
+  items: WeeklyGoal[];
 };
 
 type HistoryPoint = { ts: number; value: number };
@@ -618,6 +636,10 @@ export default function App() {
   const [ticketContext, setTicketContext] = useState<{ title: string; url?: string | null; sourceType: string; sourceId?: string | null } | null>(null);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [ticketsLoading, setTicketsLoading] = useState(false);
+  const [weeklyGoals, setWeeklyGoals] = useState<WeeklyGoalsPayload>({ weekKey: "", title: "Цели недели", items: [] });
+  const [weeklyGoalsLoading, setWeeklyGoalsLoading] = useState(false);
+  const [weeklyGoalDraft, setWeeklyGoalDraft] = useState("");
+  const [weeklyGoalStatus, setWeeklyGoalStatus] = useState("");
   const [showIntro, setShowIntro] = useState(false);
   const [introReady, setIntroReady] = useState(false);
 
@@ -1107,8 +1129,8 @@ export default function App() {
     if (!steamConnected) {
       cards.push({
         id: "connect-steam",
-        title: "Подключи Steam и получи реальную картину",
-        body: "Как только подключишь профиль, LUDO покажет сумму инвентаря, движение по предметам и персональный радар.",
+        title: "Подключи Steam — и я начну говорить по делу",
+        body: "Как только подключишь профиль, покажу сумму инвентаря, живые движения и предметы, которые реально стоит держать в Radar.",
         cta: "Подключить Steam",
         action: "connect",
       });
@@ -1117,19 +1139,32 @@ export default function App() {
     if (steamConnected && profileState.daily.lastCheckinDate !== todayStr()) {
       cards.push({
         id: "daily-checkin",
-        title: "Забери ежедневку и XP сезона",
-        body: "Сейчас у тебя есть бесплатная отметка дня — это и удержание стрика, и прогресс в LUDO PASS.",
-        cta: "Отметиться",
+        title: `Забери daily — это +20 XP и почти уровень`,
+        body: xpToNextReward > 0
+          ? `До следующей награды осталось примерно ${xpToNextReward} XP. Один заход сейчас — и ты ближе к призу.`
+          : "Награда уже рядом. Забери daily и дожми следующий уровень LUDO PASS.",
+        cta: "Забрать daily",
         action: "daily",
       });
     }
 
     const hottestUntracked = topMomentumItems.find((item) => !watchSet.has(item.marketHashName));
-    if (hottestUntracked) {
+    if (steamConnected && watchedItems.length === 0) {
+      cards.push({
+        id: hottestUntracked ? `radar-zero-${hottestUntracked.marketHashName}` : "radar-zero",
+        title: `У тебя ${inventory.length} позиций и 0 в Radar. Я бы это исправил.`,
+        body: hottestUntracked
+          ? `${hottestUntracked.name} уже двигается на ${deltaLabel(hottestUntracked.deltaPct)}. Начни с него.`
+          : "Добавь хотя бы один предмет в Radar — тогда LUDO начнёт подсвечивать, что реально шевелится.",
+        cta: hottestUntracked ? "Добавить в Radar" : "Открыть Radar",
+        action: hottestUntracked ? "radar" : "inventory",
+        itemHash: hottestUntracked?.marketHashName,
+      });
+    } else if (hottestUntracked) {
       cards.push({
         id: `radar-${hottestUntracked.marketHashName}`,
-        title: "LUDO нашёл предмет для радара",
-        body: `${hottestUntracked.name} сейчас двигается на ${deltaLabel(hottestUntracked.deltaPct)}. Его стоит поставить на слежение, пока он живой.`,
+        title: "LUDO уже нашёл тебе движение",
+        body: `${hottestUntracked.name} сейчас идёт на ${deltaLabel(hottestUntracked.deltaPct)}. Его стоит поставить на слежение, пока он живой.`,
         cta: "Добавить в Radar",
         action: "radar",
         itemHash: hottestUntracked.marketHashName,
@@ -1141,7 +1176,7 @@ export default function App() {
       cards.push({
         id: `item-${topValued.marketHashName}`,
         title: "Вот твоя главная позиция прямо сейчас",
-        body: `${topValued.name} — самая тяжёлая позиция в инвентаре на ${money(topValued.totalValue)}.`,
+        body: `${topValued.name} — самая тяжёлая часть инвентаря на ${money(topValued.totalValue)}. Проверь её первой.`,
         cta: "Открыть предмет",
         action: "item",
         itemHash: topValued.marketHashName,
@@ -1152,14 +1187,14 @@ export default function App() {
       cards.push({
         id: "inventory-empty",
         title: "Собери первую полезную картину",
-        body: "Подключи инвентарь и добавь хотя бы один предмет в радар — тогда приложение начнёт работать как ассистент, а не как пустая оболочка.",
+        body: "Подключи инвентарь и добавь хотя бы один предмет в Radar — тогда приложение начнёт работать как ассистент, а не как пустая оболочка.",
         cta: "Открыть инвентарь",
         action: "inventory",
       });
     }
 
     return cards.slice(0, 3);
-  }, [steamConnected, profileState.daily.lastCheckinDate, topMomentumItems, watchSet, topValueItems]);
+  }, [steamConnected, profileState.daily.lastCheckinDate, topMomentumItems, watchSet, topValueItems, xpToNextReward, watchedItems.length, inventory.length]);
 
   const passTaskCards = useMemo(() => {
     return PASS_TASKS.map((task) => {
@@ -1174,6 +1209,18 @@ export default function App() {
     const rewards = [...PASS_FREE_REWARDS, ...PASS_PREMIUM_REWARDS];
     return rewards.find((reward) => reward.level >= passLevel && !passState.claimedRewards.includes(reward.id)) || rewards[rewards.length - 1];
   }, [passLevel, passState.claimedRewards]);
+
+  const xpToNextReward = useMemo(() => {
+    if (!nextPassReward?.level) return 0;
+    return Math.max(0, nextPassReward.level * PASS_XP_PER_LEVEL - passState.xp);
+  }, [nextPassReward, passState.xp]);
+
+  const feedHeroText = useMemo(() => {
+    if (!steamConnected || !inventory.length) {
+      return "Подключи Steam — покажу, что происходит с твоим инвентарём.";
+    }
+    return `Сегодня у тебя ${money(totalValue)} в инвентаре · ${watchedItems.length} предметов в Radar · до следующей награды ~${xpToNextReward} XP`;
+  }, [steamConnected, inventory.length, totalValue, watchedItems.length, xpToNextReward]);
 
   const rangeHistory = useMemo(() => filterHistory(selectedHistory, historyRange), [selectedHistory, historyRange]);
   const historyPolyline = useMemo(() => buildSvgPolyline(rangeHistory), [rangeHistory]);
@@ -1395,6 +1442,101 @@ export default function App() {
     }
   }, [apiBase, isAdmin, tgUserId]);
 
+  const fetchWeeklyGoals = useCallback(async () => {
+    if (!apiBase || !isAdmin || !tgUserId) return;
+    try {
+      setWeeklyGoalsLoading(true);
+      const response = await fetch(`${apiBase}/api/admin/goals?adminId=${tgUserId}`);
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || "weekly_goals_fetch");
+      setWeeklyGoals({
+        weekKey: String(data?.weekKey || ""),
+        title: String(data?.title || "Цели недели"),
+        items: Array.isArray(data?.items) ? data.items : [],
+      });
+      setWeeklyGoalStatus("");
+    } catch (error) {
+      setWeeklyGoalStatus(error instanceof Error ? error.message : "Не удалось загрузить цели недели.");
+    } finally {
+      setWeeklyGoalsLoading(false);
+    }
+  }, [apiBase, isAdmin, tgUserId]);
+
+  useEffect(() => {
+    if (profileSection === "admin" && isAdmin) {
+      fetchWeeklyGoals();
+    }
+  }, [profileSection, isAdmin, fetchWeeklyGoals]);
+
+  const addWeeklyGoal = useCallback(async () => {
+    if (!apiBase || !isAdmin || !tgUserId) return;
+    const text = weeklyGoalDraft.trim();
+    if (!text) {
+      setWeeklyGoalStatus("Сначала напиши цель.");
+      return;
+    }
+    try {
+      const response = await fetch(`${apiBase}/api/admin/goals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adminId: tgUserId, text }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || "weekly_goal_add");
+      setWeeklyGoals({
+        weekKey: String(data?.weekKey || ""),
+        title: String(data?.title || "Цели недели"),
+        items: Array.isArray(data?.items) ? data.items : [],
+      });
+      setWeeklyGoalDraft("");
+      setWeeklyGoalStatus("Цель добавлена.");
+    } catch (error) {
+      setWeeklyGoalStatus(error instanceof Error ? error.message : "Не удалось добавить цель.");
+    }
+  }, [apiBase, isAdmin, tgUserId, weeklyGoalDraft]);
+
+  const toggleWeeklyGoal = useCallback(async (goalId: string) => {
+    if (!apiBase || !isAdmin || !tgUserId) return;
+    try {
+      const response = await fetch(`${apiBase}/api/admin/goals/${encodeURIComponent(goalId)}/toggle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adminId: tgUserId }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || "weekly_goal_toggle");
+      setWeeklyGoals({
+        weekKey: String(data?.weekKey || ""),
+        title: String(data?.title || "Цели недели"),
+        items: Array.isArray(data?.items) ? data.items : [],
+      });
+      setWeeklyGoalStatus("");
+    } catch (error) {
+      setWeeklyGoalStatus(error instanceof Error ? error.message : "Не удалось отметить цель.");
+    }
+  }, [apiBase, isAdmin, tgUserId]);
+
+  const deleteWeeklyGoal = useCallback(async (goalId: string) => {
+    if (!apiBase || !isAdmin || !tgUserId) return;
+    try {
+      const response = await fetch(`${apiBase}/api/admin/goals/${encodeURIComponent(goalId)}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adminId: tgUserId }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || "weekly_goal_delete");
+      setWeeklyGoals({
+        weekKey: String(data?.weekKey || ""),
+        title: String(data?.title || "Цели недели"),
+        items: Array.isArray(data?.items) ? data.items : [],
+      });
+      setWeeklyGoalStatus("");
+    } catch (error) {
+      setWeeklyGoalStatus(error instanceof Error ? error.message : "Не удалось удалить цель.");
+    }
+  }, [apiBase, isAdmin, tgUserId]);
+
   const shareNews = useCallback((item: FeedItem) => {
     const link = item.url || window.location.href;
     const compactBody = String(item.body || "").replace(/\s+/g, " ").trim();
@@ -1496,27 +1638,19 @@ export default function App() {
         </div>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-sm text-neutral-400">
-            {activeTab === "feed" && (newsLoading ? "Обновляю ленту..." : (inventory.length ? "LUDO уже собрал для тебя сигналы, новости и сезонный прогресс." : newsStatus))}
+            {activeTab === "feed" && (newsLoading ? "Обновляю ленту..." : feedHeroText)}
             {activeTab === "inventory" && inventoryStatus}
             {activeTab === "radar" && "LUDO сам подсвечивает, где у тебя движение, риск и смысл зайти завтра."}
             {activeTab === "item" && (selectedItem ? selectedItem.name : "Сначала выбери предмет из инвентаря.")}
           </div>
           {activeTab === "feed" ? (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button variant="ghost" size="icon" onClick={refreshNews} className="rounded-2xl border border-white/10 bg-white/5 text-white hover:bg-white/10" title="Обновить ленту">
                 <RefreshCw className={`h-4 w-4 ${newsLoading ? "animate-spin" : ""}`} />
               </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setSavedOnly((value) => !value);
-                  setFeedFilter("Все новости");
-                }}
-                className="rounded-2xl border border-white/10 bg-white/5 px-3 text-white hover:bg-white/10"
-              >
-                <FolderOpen className="mr-2 h-4 w-4" />
-                {savedOnly ? "Все" : "Сохранённое"}
-              </Button>
+              <Button onClick={doDailyCheckin} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">🔥 Забрать daily</Button>
+              <Button variant="ghost" onClick={() => goTab("radar")} className="rounded-2xl border border-white/10 bg-white/5 px-3 text-white hover:bg-white/10">📡 Открыть Radar</Button>
+              <Button variant="ghost" onClick={() => goTab("item")} className="rounded-2xl border border-white/10 bg-white/5 px-3 text-white hover:bg-white/10">➕ Добавить предмет</Button>
             </div>
           ) : null}
         </div>
@@ -1535,6 +1669,23 @@ export default function App() {
         {activeTab === "feed" && (
           <div className="space-y-4">
             <Section title="LUDO // Сегодня" className="border-cyan-400/20 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.18),transparent_42%),radial-gradient(circle_at_top_right,rgba(217,70,239,0.16),transparent_38%),linear-gradient(135deg,rgba(12,14,28,0.96),rgba(10,16,30,0.92))]">
+              <div className="mb-3 grid grid-cols-3 gap-2">
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-neutral-400">Сегодня</div>
+                  <div className="mt-1 text-sm font-semibold text-white">{money(totalValue)}</div>
+                  <div className="mt-1 text-[11px] text-neutral-400">Инвентарь</div>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-neutral-400">Radar</div>
+                  <div className="mt-1 text-sm font-semibold text-white">{watchedItems.length}</div>
+                  <div className="mt-1 text-[11px] text-neutral-400">Сигналов под рукой</div>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-neutral-400">Награда</div>
+                  <div className="mt-1 text-sm font-semibold text-white">~{xpToNextReward} XP</div>
+                  <div className="mt-1 text-[11px] text-neutral-400">До следующей</div>
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
                   <div className="text-xs uppercase tracking-[0.18em] text-cyan-200/70">Инвентарь</div>
@@ -2032,6 +2183,58 @@ export default function App() {
                   <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Watchlist</div><div className="mt-1 font-semibold text-white">{profileState.watchlist.length}</div></div>
                   <div className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="text-neutral-500">Тикеты</div><div className="mt-1 font-semibold text-white">{tickets.filter((ticket) => ticket.status !== "done").length}</div></div>
                 </div>
+
+                <div className="mt-4 rounded-[1.5rem] border border-cyan-300/20 bg-[linear-gradient(180deg,rgba(20,26,58,0.78),rgba(10,7,22,0.9))] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2 text-white"><Target className="h-4 w-4 text-cyan-300" />Цели на неделю</div>
+                      <div className="mt-1 text-xs text-neutral-400">{weeklyGoals.title || "Общий список задач для вас двоих."}</div>
+                    </div>
+                    <Button onClick={() => fetchWeeklyGoals()} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Обновить</Button>
+                  </div>
+
+                  <div className="mt-3 flex gap-2">
+                    <Input
+                      value={weeklyGoalDraft}
+                      onChange={(event) => setWeeklyGoalDraft(event.target.value)}
+                      placeholder="Например: добить ножи, выгрузить пост, проверить тикеты"
+                      className="rounded-2xl border-white/10 bg-black/20 text-white placeholder:text-neutral-500"
+                    />
+                    <Button onClick={addWeeklyGoal} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">
+                      <Plus className="mr-2 h-4 w-4" />Добавить
+                    </Button>
+                  </div>
+
+                  {weeklyGoalStatus ? <div className="mt-2 text-xs text-cyan-200/80">{weeklyGoalStatus}</div> : null}
+
+                  <div className="mt-4 space-y-2">
+                    {weeklyGoalsLoading ? <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-neutral-400">Загружаю цели недели…</div> : null}
+                    {!weeklyGoalsLoading && weeklyGoals.items.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-neutral-400">Пока пусто. Добавьте 2–3 понятные цели на неделю, чтобы не расползаться.</div> : null}
+                    {weeklyGoals.items.map((goal, index) => (
+                      <div key={goal.id} className={`flex items-center gap-3 rounded-2xl border p-3 ${goal.done ? "border-emerald-300/20 bg-emerald-400/10" : "border-white/10 bg-black/20"}`}>
+                        <button
+                          onClick={() => toggleWeeklyGoal(goal.id)}
+                          className={`flex h-10 w-10 items-center justify-center rounded-2xl border ${goal.done ? "border-emerald-300/30 bg-emerald-400/15 text-emerald-100" : "border-white/10 bg-white/10 text-white hover:bg-white/15"}`}
+                        >
+                          <CheckCircle2 className="h-5 w-5" />
+                        </button>
+                        <div className="min-w-0 flex-1">
+                          <div className={`text-sm font-medium ${goal.done ? "text-emerald-50 line-through decoration-emerald-200/60" : "text-white"}`}>{index + 1}. {goal.text}</div>
+                          <div className="mt-1 text-[11px] text-neutral-500">
+                            {goal.done ? "Сделано" : "В работе"}{goal.updatedAt ? ` · ${timeAgoRu(Math.floor(goal.updatedAt / 1000))}` : ""}{goal.updatedBy ? ` · admin ${goal.updatedBy}` : ""}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => deleteWeeklyGoal(goal.id)}
+                          className="flex h-10 w-10 items-center justify-center rounded-2xl border border-rose-300/20 bg-rose-400/10 text-rose-100 hover:bg-rose-400/15"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button onClick={() => setProfileSection("tickets")} className="rounded-2xl bg-white text-[#0A0716] hover:bg-neutral-100">Открыть тикеты</Button>
                   <Button onClick={() => fetchTickets()} className="rounded-2xl border border-white/10 bg-white/10 text-white hover:bg-white/15">Обновить тикеты</Button>

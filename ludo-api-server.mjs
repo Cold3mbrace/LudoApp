@@ -19,6 +19,7 @@ const NEWS_DIR = path.join(DATA_DIR, "news");
 const ITEMS_DIR = path.join(DATA_DIR, "items");
 const REF_INDEX_PATH = path.join(DATA_DIR, "referral-index.json");
 const TICKETS_PATH = path.join(DATA_DIR, "tickets.json");
+const WEEKLY_GOALS_PATH = path.join(DATA_DIR, "weekly-goals.json");
 const ACTIVITY_PATH = path.join(DATA_DIR, "activity.json");
 
 const PRICE_TTL_MS = 1000 * 60 * 60 * 6;
@@ -478,6 +479,55 @@ async function readTickets() {
 
 async function writeTickets(items) {
   await writeJson(TICKETS_PATH, Array.isArray(items) ? items : []);
+}
+
+
+function startOfWeekIso(date = new Date()) {
+  const current = new Date(date);
+  const day = current.getUTCDay() || 7;
+  current.setUTCHours(0, 0, 0, 0);
+  current.setUTCDate(current.getUTCDate() - day + 1);
+  return current.toISOString().slice(0, 10);
+}
+
+function formatWeekTitle(weekKey) {
+  const start = new Date(`${weekKey}T00:00:00.000Z`);
+  if (Number.isNaN(start.getTime())) return "Цели недели";
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 6);
+  const startLabel = start.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+  const endLabel = end.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+  return `Неделя ${startLabel}–${endLabel}`;
+}
+
+async function readWeeklyGoals() {
+  const weekKey = startOfWeekIso();
+  const raw = await readJson(WEEKLY_GOALS_PATH, null);
+  const items = Array.isArray(raw?.items) ? raw.items : [];
+  if (raw?.weekKey === weekKey) {
+    return {
+      weekKey,
+      title: String(raw?.title || formatWeekTitle(weekKey)),
+      items,
+    };
+  }
+  const reset = {
+    weekKey,
+    title: formatWeekTitle(weekKey),
+    items: [],
+  };
+  await writeJson(WEEKLY_GOALS_PATH, reset);
+  return reset;
+}
+
+async function writeWeeklyGoals(payload) {
+  const next = {
+    weekKey: String(payload?.weekKey || startOfWeekIso()),
+    title: String(payload?.title || formatWeekTitle(String(payload?.weekKey || startOfWeekIso()))),
+    items: Array.isArray(payload?.items) ? payload.items : [],
+  };
+  await writeJson(WEEKLY_GOALS_PATH, next);
+  return next;
 }
 
 async function getItemMetaByHashName(marketHashName) {
@@ -1821,6 +1871,97 @@ app.post("/api/tickets/:id/status", async (req, res) => {
   } catch (error) {
     res.status(400).json({
       error: error instanceof Error ? error.message : "Не удалось обновить тикет.",
+    });
+  }
+});
+
+
+app.get("/api/admin/goals", async (req, res) => {
+  try {
+    const adminId = Number(req.query.adminId || 0);
+    if (!isAdminId(adminId)) {
+      res.status(403).json({ error: "Нет доступа." });
+      return;
+    }
+    const goals = await readWeeklyGoals();
+    res.json({ ok: true, ...goals });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось получить цели недели.",
+    });
+  }
+});
+
+app.post("/api/admin/goals", async (req, res) => {
+  try {
+    const adminId = Number(req.body?.adminId || 0);
+    if (!isAdminId(adminId)) {
+      res.status(403).json({ error: "Нет доступа." });
+      return;
+    }
+    const text = String(req.body?.text || "").trim();
+    if (!text) throw new Error("Напиши цель перед добавлением.");
+
+    const current = await readWeeklyGoals();
+    const item = {
+      id: crypto.randomUUID(),
+      text: text.slice(0, 240),
+      done: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      updatedBy: adminId,
+    };
+    const next = await writeWeeklyGoals({
+      ...current,
+      items: [item, ...current.items].slice(0, 50),
+    });
+    res.json({ ok: true, ...next, item });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось добавить цель недели.",
+    });
+  }
+});
+
+app.post("/api/admin/goals/:id/toggle", async (req, res) => {
+  try {
+    const adminId = Number(req.body?.adminId || 0);
+    if (!isAdminId(adminId)) {
+      res.status(403).json({ error: "Нет доступа." });
+      return;
+    }
+    const goalId = String(req.params?.id || "").trim();
+    const current = await readWeeklyGoals();
+    const items = current.items.map((goal) =>
+      goal?.id === goalId
+        ? { ...goal, done: !Boolean(goal?.done), updatedAt: Date.now(), updatedBy: adminId }
+        : goal
+    );
+    const next = await writeWeeklyGoals({ ...current, items });
+    const item = next.items.find((goal) => goal?.id === goalId) || null;
+    res.json({ ok: true, ...next, item });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось обновить цель недели.",
+    });
+  }
+});
+
+app.delete("/api/admin/goals/:id", async (req, res) => {
+  try {
+    const adminId = Number(req.body?.adminId || req.query?.adminId || 0);
+    if (!isAdminId(adminId)) {
+      res.status(403).json({ error: "Нет доступа." });
+      return;
+    }
+    const goalId = String(req.params?.id || "").trim();
+    const current = await readWeeklyGoals();
+    const items = current.items.filter((goal) => goal?.id !== goalId);
+    const next = await writeWeeklyGoals({ ...current, items });
+    res.json({ ok: true, ...next });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Не удалось удалить цель недели.",
     });
   }
 });
