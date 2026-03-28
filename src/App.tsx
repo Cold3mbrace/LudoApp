@@ -1123,6 +1123,13 @@ export default function App() {
       .slice(0, 6);
   }, [inventory, totalValue, watchSet]);
 
+  const xpToNextReward = useMemo(() => {
+    const rewards = [...PASS_FREE_REWARDS, ...PASS_PREMIUM_REWARDS];
+    const nextReward = rewards.find((reward) => reward.level >= passLevel && !passState.claimedRewards.includes(reward.id)) || rewards[rewards.length - 1];
+    if (!nextReward?.level) return 0;
+    return Math.max(0, nextReward.level * PASS_XP_PER_LEVEL - passState.xp);
+  }, [passLevel, passState.claimedRewards, passState.xp]);
+
   const dashboardRecommendations = useMemo(() => {
     const cards: Array<{ id: string; title: string; body: string; cta: string; action: "connect" | "daily" | "radar" | "item" | "inventory"; itemHash?: string }> = [];
 
@@ -1195,13 +1202,6 @@ export default function App() {
 
     return cards.slice(0, 3);
   }, [steamConnected, profileState.daily.lastCheckinDate, topMomentumItems, watchSet, topValueItems, xpToNextReward, watchedItems.length, inventory.length]);
-
-  const xpToNextReward = useMemo(() => {
-    const rewards = [...PASS_FREE_REWARDS, ...PASS_PREMIUM_REWARDS];
-    const nextReward = rewards.find((reward) => reward.level >= passLevel && !passState.claimedRewards.includes(reward.id)) || rewards[rewards.length - 1];
-    if (!nextReward?.level) return 0;
-    return Math.max(0, nextReward.level * PASS_XP_PER_LEVEL - passState.xp);
-  }, [passLevel, passState.claimedRewards, passState.xp]);
 
   const passTaskCards = useMemo(() => {
     return PASS_TASKS.map((task) => {
