@@ -99,6 +99,7 @@ type WeeklyGoal = {
   createdAt: number;
   updatedAt?: number;
   updatedBy?: number | null;
+  updatedByName?: string;
   assignee?: string | null;
 };
 
