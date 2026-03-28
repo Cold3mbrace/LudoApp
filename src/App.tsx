@@ -1196,6 +1196,13 @@ export default function App() {
     return cards.slice(0, 3);
   }, [steamConnected, profileState.daily.lastCheckinDate, topMomentumItems, watchSet, topValueItems, xpToNextReward, watchedItems.length, inventory.length]);
 
+  const xpToNextReward = useMemo(() => {
+    const rewards = [...PASS_FREE_REWARDS, ...PASS_PREMIUM_REWARDS];
+    const nextReward = rewards.find((reward) => reward.level >= passLevel && !passState.claimedRewards.includes(reward.id)) || rewards[rewards.length - 1];
+    if (!nextReward?.level) return 0;
+    return Math.max(0, nextReward.level * PASS_XP_PER_LEVEL - passState.xp);
+  }, [passLevel, passState.claimedRewards, passState.xp]);
+
   const passTaskCards = useMemo(() => {
     return PASS_TASKS.map((task) => {
       const done = task.kind === "daily"
@@ -1209,11 +1216,6 @@ export default function App() {
     const rewards = [...PASS_FREE_REWARDS, ...PASS_PREMIUM_REWARDS];
     return rewards.find((reward) => reward.level >= passLevel && !passState.claimedRewards.includes(reward.id)) || rewards[rewards.length - 1];
   }, [passLevel, passState.claimedRewards]);
-
-  const xpToNextReward = useMemo(() => {
-    if (!nextPassReward?.level) return 0;
-    return Math.max(0, nextPassReward.level * PASS_XP_PER_LEVEL - passState.xp);
-  }, [nextPassReward, passState.xp]);
 
   const feedHeroText = useMemo(() => {
     if (!steamConnected || !inventory.length) {
