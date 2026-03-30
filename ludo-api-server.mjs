@@ -1687,6 +1687,7 @@ async function getPriceSnapshot(marketHashName) {
     return buildCachedResponse();
   }
 
+  console.warn(`[price-zero] ${marketHashName}`);
   return { marketHashName, price: 0, history: [], deltaPct: 0, cached: false };
 }
 
@@ -2443,6 +2444,7 @@ app.get("/api/steam/inventory", async (req, res) => {
         ),
       ].filter(Boolean);
 
+      console.warn(`[inventory-pricing-start] steamId=${resolved.steamId} candidates=${uniqueNames.length}`);
       const pricedEntries = await mapWithConcurrency(
         uniqueNames,
         async (name) => {
@@ -2461,6 +2463,7 @@ app.get("/api/steam/inventory", async (req, res) => {
       totalValue = items.reduce((sum, item) => sum + item.totalValue, 0);
       marketableCount = items.filter((item) => item.marketable).length;
       pricedCount = items.filter((item) => item.price > 0).length;
+      console.warn(`[inventory-valuation] steamId=${resolved.steamId} marketable=${marketableCount} priced=${pricedCount} totalValue=${totalValue.toFixed(2)}`);
 
       await writeJson(inventoryCachePath(resolved.steamId), {
         ...(inventoryResult.cache || {}),
