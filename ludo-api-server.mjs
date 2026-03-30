@@ -1687,16 +1687,7 @@ async function getPriceSnapshot(marketHashName) {
     return buildCachedResponse();
   }
 
-  console.warn("[price-zero]", marketHashName);
-
-  return {
-    marketHashName,
-    price: 0,
-    history: [],
-    deltaPct: 0,
-    cached: false,
-    unavailable: true,
-  };
+  return { marketHashName, price: 0, history: [], deltaPct: 0, cached: false };
 }
 
 async function mapWithConcurrency(items, worker, concurrency = 3) {
@@ -1757,15 +1748,6 @@ function buildInventoryItems(payload, priceMap = {}) {
   return items.sort((a, b) => b.totalValue - a.totalValue || a.name.localeCompare(b.name));
 }
 
-function hasBrokenValuationCache(items = []) {
-  if (!Array.isArray(items) || items.length === 0) return true;
-
-  const marketable = items.filter((item) => item?.marketable);
-  if (marketable.length === 0) return false;
-
-  const priced = marketable.filter((item) => Number(item?.price || 0) > 0);
-  return priced.length === 0;
-}
 
 function newsKey(item = {}) {
   return `${String(item.url || "").trim().toLowerCase()}::${String(item.title || "").trim().toLowerCase()}`;
@@ -2440,72 +2422,42 @@ app.get("/api/steam/inventory", async (req, res) => {
     const inventoryResult = await getInventory(resolved.steamId, { force });
     const inventoryPayload = inventoryResult.payload;
 
-    let items = Array.isArray(inventoryResult?.cache?.items) ? inventoryResult.cache.items : [];
-    let totalValue = Number(inventoryResult?.cache?.totalValue || 0);
-    let marketableCount = items.filter((item) => item.marketable).length;
-    let pricedCount = items.filter((item) => item.price > 0).length;
+    const descriptions = Array.isArray(inventoryPayload?.descriptions) ? inventoryPayload.descriptions : [];
+    const uniqueNames = [
+      ...new Set(
+        descriptions
+          .map((entry) => entry?.market_hash_name || entry?.name)
+          .filter(Boolean)
+      ),
+    ].filter(Boolean);
 
-    const brokenValuationCache = hasBrokenValuationCache(items);
-    const shouldRebuildValuation =
-      force ||
-      !items.length ||
-      brokenValuationCache ||
-      (!inventoryResult.cached && !inventoryResult.stale);
+    const pricedEntries = await mapWithConcurrency(
+      uniqueNames,
+      async (name) => {
+        try {
+          return [name, await getPriceSnapshot(name)];
+        } catch (error) {
+          console.warn("[price]", name, error instanceof Error ? error.message : String(error));
+          return [name, { marketHashName: name, price: 0, history: [], deltaPct: 0 }];
+        }
+      },
+      2
+    );
 
-    if (shouldRebuildValuation) {
-      const descriptions = Array.isArray(inventoryPayload?.descriptions) ? inventoryPayload.descriptions : [];
-      const uniqueNames = [
-        ...new Set(
-          descriptions
-            .filter((entry) => entry?.marketable && (entry?.market_hash_name || entry?.name))
-            .map((entry) => entry?.market_hash_name || entry?.name)
-            .filter(Boolean)
-        ),
-      ];
+    const priceMap = Object.fromEntries(pricedEntries);
+    const items = buildInventoryItems(inventoryPayload, priceMap);
+    const totalValue = items.reduce((sum, item) => sum + item.totalValue, 0);
+    const marketableCount = items.filter((item) => item.marketable).length;
+    const pricedCount = items.filter((item) => item.price > 0).length;
 
-      const pricedEntries = await mapWithConcurrency(
-        uniqueNames,
-        async (name) => {
-          try {
-            return [name, await getPriceSnapshot(name)];
-          } catch (error) {
-            console.warn("[price]", name, error instanceof Error ? error.message : String(error));
-            return [name, { marketHashName: name, price: 0, history: [], deltaPct: 0 }];
-          }
-        },
-        inventoryResult.rateLimited ? 1 : 2
-      );
-
-      const priceMap = Object.fromEntries(pricedEntries);
-      items = buildInventoryItems(inventoryPayload, priceMap);
-      totalValue = items.reduce((sum, item) => sum + item.totalValue, 0);
-      marketableCount = items.filter((item) => item.marketable).length;
-      pricedCount = items.filter((item) => item.price > 0).length;
-
-      const shouldPersistValuation = pricedCount > 0 || marketableCount === 0;
-
-      if (shouldPersistValuation) {
-        await writeJson(inventoryCachePath(resolved.steamId), {
-          ...(inventoryResult.cache || {}),
-          updatedAt: Date.now(),
-          payload: inventoryPayload,
-          items,
-          totalValue,
-          personaname: summary?.personaname || resolved.profile?.personaname || null,
-          profile: summary || resolved.profile || null,
-          rateLimitedUntil: null,
-          lastError: null,
-        });
-      } else {
-        console.warn("[inventory:skip-zero-cache]", {
-          steamId: resolved.steamId,
-          items: items.length,
-          marketableCount,
-          pricedCount,
-          totalValue,
-        });
-      }
-    }
+    await writeJson(inventoryCachePath(resolved.steamId), {
+      updatedAt: Date.now(),
+      payload: inventoryPayload,
+      items,
+      totalValue,
+      personaname: summary?.personaname || resolved.profile?.personaname || null,
+      profile: summary || resolved.profile || null,
+    });
 
     const user = await readUserState(key);
     user.steam = {
@@ -2530,7 +2482,7 @@ app.get("/api/steam/inventory", async (req, res) => {
       updatedAt: Date.now(),
       cached: inventoryResult.cached,
       stale: inventoryResult.stale,
-      rateLimited: inventoryResult.rateLimited,
+      rateLimited: inventoryResult.rateLimited || false,
       message: inventoryResult.rateLimited ? "Steam временно режет запросы, поэтому отдали последние сохранённые данные." : null,
     });
   } catch (error) {
@@ -2701,5 +2653,6 @@ await migrateLegacyJsonToPostgres();
 
 app.listen(PORT, HOST, () => {
   console.log(`LUDO API listening on http://${HOST}:${PORT}`);
+  console.log("LUDO valuation flow: legacy wow-plus-knives");
   console.log(`LUDO Postgres storage: connected`);
 });
