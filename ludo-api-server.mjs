@@ -130,7 +130,7 @@ async function migrateLegacyJsonToPostgres() {
     const names = await fs.readdir(dir).catch(() => []);
     for (const name of names) {
       if (!name.endsWith(".json")) continue;
-      await migrateFileIntoPostgres(path.join(dir, name));
+      await migrateFileIntoSqlite(path.join(dir, name));
     }
   }
 }
@@ -1687,8 +1687,16 @@ async function getPriceSnapshot(marketHashName) {
     return buildCachedResponse();
   }
 
-  console.warn(`[price-zero] ${marketHashName}`);
-  return { marketHashName, price: 0, history: [], deltaPct: 0, cached: false };
+  console.warn("[price-zero]", marketHashName);
+
+  return {
+    marketHashName,
+    price: 0,
+    history: [],
+    deltaPct: 0,
+    cached: false,
+    unavailable: true,
+  };
 }
 
 async function mapWithConcurrency(items, worker, concurrency = 3) {
@@ -1749,6 +1757,15 @@ function buildInventoryItems(payload, priceMap = {}) {
   return items.sort((a, b) => b.totalValue - a.totalValue || a.name.localeCompare(b.name));
 }
 
+function hasBrokenValuationCache(items = []) {
+  if (!Array.isArray(items) || items.length === 0) return true;
+
+  const marketable = items.filter((item) => item?.marketable);
+  if (marketable.length === 0) return false;
+
+  const priced = marketable.filter((item) => Number(item?.price || 0) > 0);
+  return priced.length === 0;
+}
 
 function newsKey(item = {}) {
   return `${String(item.url || "").trim().toLowerCase()}::${String(item.title || "").trim().toLowerCase()}`;
@@ -2426,25 +2443,26 @@ app.get("/api/steam/inventory", async (req, res) => {
     let items = Array.isArray(inventoryResult?.cache?.items) ? inventoryResult.cache.items : [];
     let totalValue = Number(inventoryResult?.cache?.totalValue || 0);
     let marketableCount = items.filter((item) => item.marketable).length;
-    let pricedCount = items.filter((item) => Number(item.price || 0) > 0).length;
-    const hasReadyItems = Array.isArray(inventoryResult?.cache?.items) && inventoryResult.cache.items.length > 0;
-    const hasBrokenValuationCache = hasReadyItems && marketableCount > 0 && pricedCount === 0;
-    const shouldRebuildItems =
-      !hasReadyItems ||
-      (!inventoryResult.cached && !inventoryResult.stale) ||
-      hasBrokenValuationCache;
+    let pricedCount = items.filter((item) => item.price > 0).length;
 
-    if (shouldRebuildItems) {
+    const brokenValuationCache = hasBrokenValuationCache(items);
+    const shouldRebuildValuation =
+      force ||
+      !items.length ||
+      brokenValuationCache ||
+      (!inventoryResult.cached && !inventoryResult.stale);
+
+    if (shouldRebuildValuation) {
       const descriptions = Array.isArray(inventoryPayload?.descriptions) ? inventoryPayload.descriptions : [];
       const uniqueNames = [
         ...new Set(
           descriptions
             .filter((entry) => entry?.marketable && (entry?.market_hash_name || entry?.name))
             .map((entry) => entry?.market_hash_name || entry?.name)
+            .filter(Boolean)
         ),
-      ].filter(Boolean);
+      ];
 
-      console.warn(`[inventory-pricing-start] steamId=${resolved.steamId} candidates=${uniqueNames.length}`);
       const pricedEntries = await mapWithConcurrency(
         uniqueNames,
         async (name) => {
@@ -2463,19 +2481,30 @@ app.get("/api/steam/inventory", async (req, res) => {
       totalValue = items.reduce((sum, item) => sum + item.totalValue, 0);
       marketableCount = items.filter((item) => item.marketable).length;
       pricedCount = items.filter((item) => item.price > 0).length;
-      console.warn(`[inventory-valuation] steamId=${resolved.steamId} marketable=${marketableCount} priced=${pricedCount} totalValue=${totalValue.toFixed(2)}`);
 
-      await writeJson(inventoryCachePath(resolved.steamId), {
-        ...(inventoryResult.cache || {}),
-        updatedAt: Date.now(),
-        payload: inventoryPayload,
-        items,
-        totalValue,
-        personaname: summary?.personaname || resolved.profile?.personaname || null,
-        profile: summary || resolved.profile || null,
-        rateLimitedUntil: null,
-        lastError: null,
-      });
+      const shouldPersistValuation = pricedCount > 0 || marketableCount === 0;
+
+      if (shouldPersistValuation) {
+        await writeJson(inventoryCachePath(resolved.steamId), {
+          ...(inventoryResult.cache || {}),
+          updatedAt: Date.now(),
+          payload: inventoryPayload,
+          items,
+          totalValue,
+          personaname: summary?.personaname || resolved.profile?.personaname || null,
+          profile: summary || resolved.profile || null,
+          rateLimitedUntil: null,
+          lastError: null,
+        });
+      } else {
+        console.warn("[inventory:skip-zero-cache]", {
+          steamId: resolved.steamId,
+          items: items.length,
+          marketableCount,
+          pricedCount,
+          totalValue,
+        });
+      }
     }
 
     const user = await readUserState(key);
