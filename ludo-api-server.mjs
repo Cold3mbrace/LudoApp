@@ -4,6 +4,9 @@ import cors from "cors";
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import pg from "pg";
+
+const { Pool } = pg;
 
 const app = express();
 const PORT = Number(process.env.PORT || 8787);
@@ -12,7 +15,7 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 const STEAM_WEB_API_KEY = process.env.STEAM_WEB_API_KEY || "";
 const ADMIN_IDS = new Set([793655800, 1069618912]);
 
-const DATA_DIR = path.join(process.cwd(), ".ludo-data");
+const DATA_DIR = process.env.LUDO_DATA_DIR || path.join(process.cwd(), ".ludo-data");
 const USERS_DIR = path.join(DATA_DIR, "users");
 const PRICES_DIR = path.join(DATA_DIR, "prices");
 const NEWS_DIR = path.join(DATA_DIR, "news");
@@ -21,14 +24,127 @@ const REF_INDEX_PATH = path.join(DATA_DIR, "referral-index.json");
 const TICKETS_PATH = path.join(DATA_DIR, "tickets.json");
 const WEEKLY_GOALS_PATH = path.join(DATA_DIR, "weekly-goals.json");
 const ACTIVITY_PATH = path.join(DATA_DIR, "activity.json");
+const DATABASE_URL = process.env.DATABASE_URL || "";
+
+if (!DATABASE_URL) {
+  throw new Error("DATABASE_URL is required. Add your Neon connection string in Render env.");
+}
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+});
+
+async function initDb() {
+  await pool.query(`
+    create table if not exists kv_store (
+      namespace text not null,
+      key text not null,
+      value text not null,
+      updated_at bigint not null,
+      primary key (namespace, key)
+    );
+  `);
+  await pool.query(`
+    create index if not exists idx_kv_store_namespace_updated_at
+      on kv_store(namespace, updated_at desc);
+  `);
+}
+
+function storageTargetFromPath(filePath) {
+  const rel = path.relative(DATA_DIR, filePath);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  const normalized = rel.split(path.sep).join("/");
+
+  if (normalized === "referral-index.json") return { namespace: "meta", key: "referral-index" };
+  if (normalized === "tickets.json") return { namespace: "meta", key: "tickets" };
+  if (normalized === "weekly-goals.json") return { namespace: "meta", key: "weekly-goals" };
+  if (normalized === "activity.json") return { namespace: "meta", key: "activity" };
+
+  const dirMappings = [
+    ["users/", "users"],
+    ["prices/", "prices"],
+    ["news/", "news"],
+    ["items/", "items"],
+  ];
+
+  for (const [prefix, namespace] of dirMappings) {
+    if (normalized.startsWith(prefix) && normalized.endsWith(".json")) {
+      return {
+        namespace,
+        key: normalized.slice(prefix.length, -5),
+      };
+    }
+  }
+
+  return null;
+}
+
+async function listNamespaceKeys(namespace) {
+  const { rows } = await pool.query(
+    `select key from kv_store where namespace = $1 order by key asc`,
+    [namespace]
+  );
+  return rows.map((row) => String(row.key || ""));
+}
+
+async function migrateFileIntoPostgres(filePath) {
+  const target = storageTargetFromPath(filePath);
+  if (!target) return;
+
+  const existing = await pool.query(
+    `select 1 from kv_store where namespace = $1 and key = $2 limit 1`,
+    [target.namespace, target.key]
+  );
+  if (existing.rowCount) return;
+
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    JSON.parse(raw);
+    await pool.query(
+      `
+        insert into kv_store (namespace, key, value, updated_at)
+        values ($1, $2, $3, $4)
+        on conflict(namespace, key) do update set
+          value = excluded.value,
+          updated_at = excluded.updated_at
+      `,
+      [target.namespace, target.key, raw, Date.now()]
+    );
+  } catch {
+    // ignore broken or missing legacy files
+  }
+}
+
+async function migrateLegacyJsonToPostgres() {
+  const metaFiles = [REF_INDEX_PATH, TICKETS_PATH, WEEKLY_GOALS_PATH, ACTIVITY_PATH];
+  for (const filePath of metaFiles) {
+    await migrateFileIntoPostgres(filePath);
+  }
+
+  const dirs = [USERS_DIR, PRICES_DIR, NEWS_DIR, ITEMS_DIR];
+  for (const dir of dirs) {
+    const names = await fs.readdir(dir).catch(() => []);
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      await migrateFileIntoSqlite(path.join(dir, name));
+    }
+  }
+}
 
 const PRICE_TTL_MS = 1000 * 60 * 60 * 6;
 const PRICE_HISTORY_MIN_INTERVAL_MS = 1000 * 60 * 60 * 12;
 const INVENTORY_TTL_MS = 1000 * 60 * 12;
 const INVENTORY_FORCE_COOLDOWN_MS = 1000 * 45;
+const INVENTORY_RATE_LIMIT_BACKOFF_MS = 1000 * 60 * 5;
 const NEWS_TTL_MS = 1000 * 60 * 20;
 const WEEK_MS = 1000 * 60 * 60 * 24 * 7;
 const PASS_SEASON_KEY = "LUDO_S1_BETA";
+
+const inventoryInflight = new Map();
 
 app.use(cors({ origin: FRONTEND_ORIGIN }));
 app.use(express.json({ limit: "1mb" }));
@@ -42,6 +158,19 @@ async function ensureDir(dir) {
 }
 
 async function readJson(filePath, fallback) {
+  const target = storageTargetFromPath(filePath);
+  if (target) {
+    try {
+      const { rows } = await pool.query(
+        `select value from kv_store where namespace = $1 and key = $2 limit 1`,
+        [target.namespace, target.key]
+      );
+      return rows[0] ? JSON.parse(rows[0].value) : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
   try {
     const raw = await fs.readFile(filePath, "utf-8");
     return JSON.parse(raw);
@@ -51,6 +180,21 @@ async function readJson(filePath, fallback) {
 }
 
 async function writeJson(filePath, data) {
+  const target = storageTargetFromPath(filePath);
+  if (target) {
+    await pool.query(
+      `
+        insert into kv_store (namespace, key, value, updated_at)
+        values ($1, $2, $3, $4)
+        on conflict(namespace, key) do update set
+          value = excluded.value,
+          updated_at = excluded.updated_at
+      `,
+      [target.namespace, target.key, JSON.stringify(data, null, 2), Date.now()]
+    );
+    return;
+  }
+
   await ensureDir(path.dirname(filePath));
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
@@ -829,8 +973,8 @@ async function fetchFullArticle(url) {
 
 async function getAdminSummary() {
   const [tickets, activity] = await Promise.all([readTickets(), readActivityLog()]);
-  const userFiles = await fs.readdir(USERS_DIR).catch(() => []);
-  const totalUsers = userFiles.filter((name) => name.endsWith('.json')).length;
+  const userKeys = (await listNamespaceKeys("users")).filter((key) => !(key.startsWith("steam-") && key.endsWith("-inventory")));
+  const totalUsers = userKeys.length;
   const today = todayStr();
   const activeToday = Array.isArray(activity?.daily?.[today]?.users) ? activity.daily[today].users.length : 0;
 
@@ -849,8 +993,8 @@ async function getAdminSummary() {
   let watchlistItems = 0;
   let steamConnected = 0;
   let premiumPassUsers = 0;
-  for (const filename of userFiles.filter((name) => name.endsWith('.json')).slice(0, 20000)) {
-    const state = await readJson(path.join(USERS_DIR, filename), null);
+  for (const key of userKeys.slice(0, 20000)) {
+    const state = await readUserState(key);
     referralClicks += Number(state?.referral?.clicks || 0);
     referralVerified += Number(state?.referral?.verified || 0);
     watchlistItems += Array.isArray(state?.watchlist) ? state.watchlist.length : 0;
@@ -1150,10 +1294,15 @@ function inventoryCachePath(steamId) {
   return path.join(USERS_DIR, `steam-${fileSafe(steamId)}-inventory.json`);
 }
 
-async function getInventory(steamId, { force = false } = {}) {
+async function getInventoryInternal(steamId, { force = false } = {}) {
   const cachePath = inventoryCachePath(steamId);
   const cached = await readJson(cachePath, null);
-  const cacheAge = cached?.updatedAt ? Date.now() - Number(cached.updatedAt || 0) : Number.POSITIVE_INFINITY;
+  const now = Date.now();
+  const cacheAge = cached?.updatedAt ? now - Number(cached.updatedAt || 0) : Number.POSITIVE_INFINITY;
+
+  if (cached?.rateLimitedUntil && now < Number(cached.rateLimitedUntil) && cached?.payload) {
+    return { payload: cached.payload, cache: cached, cached: true, stale: true, rateLimited: true };
+  }
 
   if (cached?.updatedAt && cacheAge < INVENTORY_TTL_MS) {
     return { payload: cached.payload, cache: cached, cached: true, stale: false, rateLimited: false };
@@ -1170,19 +1319,40 @@ async function getInventory(steamId, { force = false } = {}) {
   for (const count of counts) {
     try {
       const payload = await fetchInventoryOnce(steamId, count);
-      const nextCache = { updatedAt: Date.now(), payload };
+      const nextCache = {
+        ...(cached || {}),
+        updatedAt: Date.now(),
+        payload,
+        rateLimitedUntil: null,
+        lastError: null,
+      };
       await writeJson(cachePath, nextCache);
       return { payload, cache: nextCache, cached: false, stale: false, rateLimited: false };
     } catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
+
       if (message.includes("429")) {
         rateLimited = true;
+        const nextCache = {
+          ...(cached || {}),
+          rateLimitedUntil: Date.now() + INVENTORY_RATE_LIMIT_BACKOFF_MS,
+          lastError: message,
+        };
+        await writeJson(cachePath, nextCache);
+
         if (cached?.payload) {
-          return { payload: cached.payload, cache: cached, cached: true, stale: true, rateLimited: true };
+          return {
+            payload: cached.payload,
+            cache: { ...cached, ...nextCache },
+            cached: true,
+            stale: true,
+            rateLimited: true,
+          };
         }
         break;
       }
+
       console.warn(`[inventory] steamId=${steamId} count=${count} -> ${message}`);
     }
   }
@@ -1192,6 +1362,20 @@ async function getInventory(steamId, { force = false } = {}) {
   }
 
   throw lastError || new Error("Не удалось загрузить Steam inventory.");
+}
+
+async function getInventory(steamId, options = {}) {
+  if (inventoryInflight.has(steamId)) {
+    return inventoryInflight.get(steamId);
+  }
+
+  const task = getInventoryInternal(steamId, options)
+    .finally(() => {
+      inventoryInflight.delete(steamId);
+    });
+
+  inventoryInflight.set(steamId, task);
+  return task;
 }
 
 function parsePriceString(value) {
@@ -2242,14 +2426,16 @@ app.get("/api/steam/inventory", async (req, res) => {
     let totalValue = Number(inventoryResult?.cache?.totalValue || 0);
     let marketableCount = items.filter((item) => item.marketable).length;
     let pricedCount = items.filter((item) => item.price > 0).length;
+    const hasReadyItems = Array.isArray(inventoryResult?.cache?.items) && inventoryResult.cache.items.length > 0;
+    const shouldRebuildItems = !hasReadyItems || (!inventoryResult.cached && !inventoryResult.stale);
 
-    if (!items.length || !inventoryResult.stale) {
+    if (shouldRebuildItems) {
       const descriptions = Array.isArray(inventoryPayload?.descriptions) ? inventoryPayload.descriptions : [];
       const uniqueNames = [
         ...new Set(
           descriptions
+            .filter((entry) => entry?.marketable && (entry?.market_hash_name || entry?.name))
             .map((entry) => entry?.market_hash_name || entry?.name)
-            .filter(Boolean)
         ),
       ].filter(Boolean);
 
@@ -2273,12 +2459,15 @@ app.get("/api/steam/inventory", async (req, res) => {
       pricedCount = items.filter((item) => item.price > 0).length;
 
       await writeJson(inventoryCachePath(resolved.steamId), {
+        ...(inventoryResult.cache || {}),
         updatedAt: Date.now(),
         payload: inventoryPayload,
         items,
         totalValue,
         personaname: summary?.personaname || resolved.profile?.personaname || null,
         profile: summary || resolved.profile || null,
+        rateLimitedUntil: null,
+        lastError: null,
       });
     }
 
@@ -2471,7 +2660,10 @@ app.post("/api/referral/attach", async (req, res) => {
 });
 
 await Promise.all([ensureDir(DATA_DIR), ensureDir(USERS_DIR), ensureDir(PRICES_DIR), ensureDir(NEWS_DIR), ensureDir(ITEMS_DIR)]);
+await initDb();
+await migrateLegacyJsonToPostgres();
 
 app.listen(PORT, HOST, () => {
   console.log(`LUDO API listening on http://${HOST}:${PORT}`);
+  console.log(`LUDO Postgres storage: connected`);
 });
