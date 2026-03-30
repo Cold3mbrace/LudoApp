@@ -130,7 +130,7 @@ async function migrateLegacyJsonToPostgres() {
     const names = await fs.readdir(dir).catch(() => []);
     for (const name of names) {
       if (!name.endsWith(".json")) continue;
-      await migrateFileIntoSqlite(path.join(dir, name));
+      await migrateFileIntoPostgres(path.join(dir, name));
     }
   }
 }
@@ -2425,9 +2425,13 @@ app.get("/api/steam/inventory", async (req, res) => {
     let items = Array.isArray(inventoryResult?.cache?.items) ? inventoryResult.cache.items : [];
     let totalValue = Number(inventoryResult?.cache?.totalValue || 0);
     let marketableCount = items.filter((item) => item.marketable).length;
-    let pricedCount = items.filter((item) => item.price > 0).length;
+    let pricedCount = items.filter((item) => Number(item.price || 0) > 0).length;
     const hasReadyItems = Array.isArray(inventoryResult?.cache?.items) && inventoryResult.cache.items.length > 0;
-    const shouldRebuildItems = !hasReadyItems || (!inventoryResult.cached && !inventoryResult.stale);
+    const hasBrokenValuationCache = hasReadyItems && marketableCount > 0 && pricedCount === 0;
+    const shouldRebuildItems =
+      !hasReadyItems ||
+      (!inventoryResult.cached && !inventoryResult.stale) ||
+      hasBrokenValuationCache;
 
     if (shouldRebuildItems) {
       const descriptions = Array.isArray(inventoryPayload?.descriptions) ? inventoryPayload.descriptions : [];
