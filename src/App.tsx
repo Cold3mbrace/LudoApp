@@ -1022,14 +1022,15 @@ export default function App() {
   }, [apiBase, steamInput, userKey, awardPassTask]);
 
   useEffect(() => {
+    if (activeTab !== "inventory") return;
     if (!apiBase || !backendHydrated || inventory.length > 0 || steamLoading) return;
     const remembered = profileState.steam.input || steamInput;
     if (!remembered) return;
     connectSteam(false, remembered);
-  }, [apiBase, backendHydrated, profileState.steam.input, steamInput, inventory.length, steamLoading, connectSteam]);
+  }, [activeTab, apiBase, backendHydrated, profileState.steam.input, steamInput, inventory.length, steamLoading, connectSteam]);
 
   const refreshInventory = useCallback(async () => {
-    await connectSteam(false);
+    await connectSteam(true);
   }, [connectSteam]);
 
   useEffect(() => {
